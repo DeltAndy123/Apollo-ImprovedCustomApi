@@ -8,6 +8,10 @@
 #import "UserDefaultConstants.h"
 #import "fishhook.h"
 
+@interface RDKClient (ApolloRecentlyRead)
+- (NSURLSessionTask *)subredditsByNames:(NSArray<NSString *> *)names completion:(void (^)(NSArray *, NSError *))completion;
+@end
+
 // MARK: - Recently Read Posts
 
 // Direct access to ReadPostsTracker's in-memory ordered set via fishhook + ObjC runtime
@@ -90,7 +94,13 @@ static char kThumbTaskKey;
 static char kThumbWidthConstraintKey;
 static char kStackLeadingWithThumbConstraintKey;
 static char kStackLeadingNoThumbConstraintKey;
+static char kSubIconURLKey;
+static char kSubIconTaskKey;
 static const NSUInteger kRecentlyReadPageSize = 40;
+static const NSInteger kSubHeaderWrapperTag = 212;
+static const NSInteger kSubIconHeaderTag = 213;
+static const NSInteger kSubIconFooterTag = 214;
+static const CGFloat kSubredditIconSize = 14.0;
 static const CGFloat kRecentlyReadThumbnailSmallSize = 55.0;
 static const CGFloat kRecentlyReadThumbnailPlaceholderInset = 15.0;
 static const CGFloat kRecentlyReadCellVerticalInset = 12.0;
@@ -103,6 +113,16 @@ static NSCache<NSString *, UIImage *> *RecentlyReadThumbnailCache(void) {
     dispatch_once(&onceToken, ^{
         cache = [[NSCache alloc] init];
         cache.countLimit = 300;
+    });
+    return cache;
+}
+
+// Subreddit icon URL cache: lowercased name → NSURL (icon available) or NSNull (no icon)
+static NSMutableDictionary<NSString *, id> *SubredditIconURLCache(void) {
+    static NSMutableDictionary *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
     });
     return cache;
 }
@@ -404,6 +424,7 @@ static UIColor *RecentlyReadMetaColor(void) {
             }
 
             [self.posts addObjectsFromArray:ordered];
+            [self fetchSubredditIconsIfNeededForPosts:ordered];
             [self _refilterPosts];
             if (self.activePosts.count == 0 && ![self isSearchActive]) {
                 [self showEmptyState];
@@ -679,6 +700,23 @@ static UIColor *RecentlyReadMetaColor(void) {
         [subHeaderBtn.heightAnchor constraintEqualToConstant:metaLineHeight].active = YES;
         [subHeaderBtn addTarget:self action:@selector(_navigateToAssociatedPath:) forControlEvents:UIControlEventTouchUpInside];
 
+        // Subreddit icon for header (left of subHeaderBtn)
+        UIImageView *subredditIconHeaderView = [[UIImageView alloc] init];
+        subredditIconHeaderView.tag = kSubIconHeaderTag;
+        subredditIconHeaderView.contentMode = UIViewContentModeScaleAspectFill;
+        subredditIconHeaderView.clipsToBounds = YES;
+        subredditIconHeaderView.layer.cornerRadius = kSubredditIconSize / 2.0;
+        subredditIconHeaderView.hidden = YES;
+        [subredditIconHeaderView.widthAnchor constraintEqualToConstant:kSubredditIconSize].active = YES;
+        [subredditIconHeaderView.heightAnchor constraintEqualToConstant:kSubredditIconSize].active = YES;
+
+        // Wrapper stack: [icon, subHeaderBtn] — replaces bare subHeaderBtn in vertical stack
+        UIStackView *subHeaderWrapper = [[UIStackView alloc] initWithArrangedSubviews:@[subredditIconHeaderView, subHeaderBtn]];
+        subHeaderWrapper.tag = kSubHeaderWrapperTag;
+        subHeaderWrapper.axis = UILayoutConstraintAxisHorizontal;
+        subHeaderWrapper.spacing = 4;
+        subHeaderWrapper.alignment = UIStackViewAlignmentCenter;
+
         // Title
         UILabel *titleLabel = [[UILabel alloc] init];
         titleLabel.tag = kTitleTag;
@@ -712,11 +750,22 @@ static UIColor *RecentlyReadMetaColor(void) {
         [authorFooterBtn.heightAnchor constraintEqualToConstant:metaLineHeight].active = YES;
         [authorFooterBtn addTarget:self action:@selector(_navigateToAssociatedPath:) forControlEvents:UIControlEventTouchUpInside];
 
-        UIStackView *footerStack = [[UIStackView alloc] initWithArrangedSubviews:@[subredditFooterBtn, byLabel, authorFooterBtn]];
+        // Subreddit icon for footer (left of subredditFooterBtn)
+        UIImageView *subredditIconFooterView = [[UIImageView alloc] init];
+        subredditIconFooterView.tag = kSubIconFooterTag;
+        subredditIconFooterView.contentMode = UIViewContentModeScaleAspectFill;
+        subredditIconFooterView.clipsToBounds = YES;
+        subredditIconFooterView.layer.cornerRadius = kSubredditIconSize / 2.0;
+        subredditIconFooterView.hidden = YES;
+        [subredditIconFooterView.widthAnchor constraintEqualToConstant:kSubredditIconSize].active = YES;
+        [subredditIconFooterView.heightAnchor constraintEqualToConstant:kSubredditIconSize].active = YES;
+
+        UIStackView *footerStack = [[UIStackView alloc] initWithArrangedSubviews:@[subredditIconFooterView, subredditFooterBtn, byLabel, authorFooterBtn]];
         footerStack.tag = kSubFooterTag;
         footerStack.axis = UILayoutConstraintAxisHorizontal;
         footerStack.spacing = 0;
         footerStack.alignment = UIStackViewAlignmentCenter;
+        [footerStack setCustomSpacing:4 afterView:subredditIconFooterView];
 
         // Author button (shown between title and stats when SubredditAtTop + Usernames)
         UIButton *authorTopBtn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -744,14 +793,14 @@ static UIColor *RecentlyReadMetaColor(void) {
         [cell.contentView addSubview:thumbnailView];
 
         UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-            subHeaderBtn, titleLabel, footerStack, authorTopBtn, statsLabel
+            subHeaderWrapper, titleLabel, footerStack, authorTopBtn, statsLabel
         ]];
         stack.tag = kStackTag;
         stack.axis = UILayoutConstraintAxisVertical;
         stack.spacing = 3;
         stack.alignment = UIStackViewAlignmentLeading;
         stack.translatesAutoresizingMaskIntoConstraints = NO;
-        [stack setCustomSpacing:kRecentlyReadDefaultTopGap afterView:subHeaderBtn];
+        [stack setCustomSpacing:kRecentlyReadDefaultTopGap afterView:subHeaderWrapper];
         [stack setCustomSpacing:kRecentlyReadDefaultTopGap afterView:titleLabel];
         [stack setCustomSpacing:0 afterView:footerStack];
         [stack setCustomSpacing:0 afterView:authorTopBtn];
@@ -794,9 +843,12 @@ static UIColor *RecentlyReadMetaColor(void) {
     BOOL showUsernames = [defaults boolForKey:@"AlwaysShowUsernames"];
 
     UIStackView *stack = (UIStackView *)[cell.contentView viewWithTag:kStackTag];
+    UIStackView *subHeaderWrapper = (UIStackView *)[cell.contentView viewWithTag:kSubHeaderWrapperTag];
     UIButton *subHeaderBtn = (UIButton *)[cell.contentView viewWithTag:kSubHeaderTag];
+    UIImageView *subIconHeaderView = (UIImageView *)[cell.contentView viewWithTag:kSubIconHeaderTag];
     UILabel *titleLabel = [cell.contentView viewWithTag:kTitleTag];
     UIStackView *footerStack = (UIStackView *)[cell.contentView viewWithTag:kSubFooterTag];
+    UIImageView *subIconFooterView = (UIImageView *)[cell.contentView viewWithTag:kSubIconFooterTag];
     UIButton *subredditFooterBtn = (UIButton *)[cell.contentView viewWithTag:kSubFooterSubredditTag];
     UILabel *byLabel = [cell.contentView viewWithTag:kSubFooterByTag];
     UIButton *authorFooterBtn = (UIButton *)[cell.contentView viewWithTag:kSubFooterAuthorTag];
@@ -835,15 +887,17 @@ static UIColor *RecentlyReadMetaColor(void) {
     NSString *authorPath = link.author.length > 0 ? [NSString stringWithFormat:@"/u/%@", link.author] : nil;
 
     if (subAtTop) {
-        [stack setCustomSpacing:kRecentlyReadExpandedTopGap afterView:subHeaderBtn];
+        [stack setCustomSpacing:kRecentlyReadExpandedTopGap afterView:subHeaderWrapper];
         [stack setCustomSpacing:kRecentlyReadExpandedTopGap afterView:titleLabel];
         // Subreddit above title
-        subHeaderBtn.hidden = NO;
+        subHeaderWrapper.hidden = NO;
         subHeaderBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
         [subHeaderBtn setTitle:link.subreddit ?: @"" forState:UIControlStateNormal];
         objc_setAssociatedObject(subHeaderBtn, &kNavPathKey, subPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
         footerStack.hidden = YES;
+        [self configureSubredditIconView:subIconHeaderView subredditName:link.subreddit];
+        [self configureSubredditIconView:subIconFooterView subredditName:nil]; // cancel/hide
 
         if (showUsernames && link.author.length > 0) {
             authorTopBtn.hidden = NO;
@@ -853,15 +907,17 @@ static UIColor *RecentlyReadMetaColor(void) {
             authorTopBtn.hidden = YES;
         }
     } else {
-        [stack setCustomSpacing:kRecentlyReadDefaultTopGap afterView:subHeaderBtn];
+        [stack setCustomSpacing:kRecentlyReadDefaultTopGap afterView:subHeaderWrapper];
         [stack setCustomSpacing:kRecentlyReadDefaultTopGap afterView:titleLabel];
         // Subreddit below title with optional author
-        subHeaderBtn.hidden = YES;
+        subHeaderWrapper.hidden = YES;
         authorTopBtn.hidden = YES;
 
         footerStack.hidden = NO;
         [subredditFooterBtn setTitle:link.subreddit ?: @"" forState:UIControlStateNormal];
         objc_setAssociatedObject(subredditFooterBtn, &kNavPathKey, subPath, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self configureSubredditIconView:subIconFooterView subredditName:link.subreddit];
+        [self configureSubredditIconView:subIconHeaderView subredditName:nil]; // cancel/hide
 
         if (showUsernames && link.author.length > 0) {
             byLabel.hidden = NO;
@@ -973,6 +1029,139 @@ static UIColor *RecentlyReadMetaColor(void) {
 
 - (id)initWithStyle:(UITableViewStyle)style {
     return [super initWithStyle:UITableViewStyleGrouped];
+}
+
+// MARK: - Subreddit Icon Loading
+
+- (void)configureSubredditIconView:(UIImageView *)iconView subredditName:(NSString *)subredditName {
+    // Cancel any pending task
+    NSURLSessionDataTask *oldTask = objc_getAssociatedObject(iconView, &kSubIconTaskKey);
+    if (oldTask) {
+        [oldTask cancel];
+        objc_setAssociatedObject(iconView, &kSubIconTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    objc_setAssociatedObject(iconView, &kSubIconURLKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSString *key = subredditName.lowercaseString;
+    if (!key.length) {
+        iconView.image = nil;
+        iconView.hidden = YES;
+        return;
+    }
+
+    id cached = SubredditIconURLCache()[key];
+
+    // Not yet fetched or no icon available → hide
+    if (!cached || [cached isKindOfClass:[NSNull class]]) {
+        iconView.image = nil;
+        iconView.hidden = YES;
+        return;
+    }
+
+    NSURL *iconURL = (NSURL *)cached;
+    NSString *urlString = iconURL.absoluteString ?: @"";
+    objc_setAssociatedObject(iconView, &kSubIconURLKey, urlString, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Check image cache first
+    UIImage *cachedImage = [RecentlyReadThumbnailCache() objectForKey:urlString];
+    if (cachedImage) {
+        iconView.image = cachedImage;
+        iconView.hidden = NO;
+        return;
+    }
+
+    // Load asynchronously; hide until ready to avoid flash
+    iconView.image = nil;
+    iconView.hidden = YES;
+
+    __weak UIImageView *weakView = iconView;
+    NSURLSessionDataTask *task = [RecentlyReadThumbnailSession() dataTaskWithURL:iconURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIImageView *sv = weakView;
+            if (!sv) return;
+            objc_setAssociatedObject(sv, &kSubIconTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (error || data.length == 0) return;
+            UIImage *image = [UIImage imageWithData:data];
+            if (!image) return;
+            [RecentlyReadThumbnailCache() setObject:image forKey:urlString];
+            NSString *current = objc_getAssociatedObject(sv, &kSubIconURLKey);
+            if ([current isEqualToString:urlString]) {
+                sv.image = image;
+                sv.hidden = NO;
+            }
+        });
+    }];
+    objc_setAssociatedObject(iconView, &kSubIconTaskKey, task, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [task resume];
+}
+
+// Batch-fetch subreddit icon URLs for any subreddits not yet in cache.
+// Called after each page of posts loads.
+- (void)fetchSubredditIconsIfNeededForPosts:(NSArray *)posts {
+    NSMutableDictionary *cache = SubredditIconURLCache();
+    NSMutableOrderedSet<NSString *> *toFetch = [NSMutableOrderedSet orderedSet];
+    for (id link in posts) {
+        NSString *name = nil;
+        if ([link respondsToSelector:@selector(subreddit)]) {
+            name = [[link performSelector:@selector(subreddit)] lowercaseString];
+        }
+        if (name.length > 0 && !cache[name]) {
+            [toFetch addObject:name];
+        }
+    }
+    if (toFetch.count == 0) return;
+
+    // Mark in-flight with NSNull to prevent duplicate fetches
+    for (NSString *name in toFetch) {
+        cache[name] = [NSNull null];
+    }
+
+    Class RDKClientClass = objc_getClass("RDKClient");
+    id client = [RDKClientClass sharedClient];
+    if (!client) return;
+
+    NSArray *toFetchArray = toFetch.array;
+    NSUInteger chunkSize = 25;
+    __weak typeof(self) weakSelf = self;
+
+    for (NSUInteger i = 0; i < toFetchArray.count; i += chunkSize) {
+        NSUInteger len = MIN(chunkSize, toFetchArray.count - i);
+        NSArray *chunk = [toFetchArray subarrayWithRange:NSMakeRange(i, len)];
+
+        [client subredditsByNames:chunk completion:^(NSArray *subreddits, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!subreddits || error) return;
+                NSMutableDictionary *c = SubredditIconURLCache();
+                BOOL changed = NO;
+                for (id sub in subreddits) {
+                    NSString *name = nil;
+                    if ([sub respondsToSelector:@selector(name)]) {
+                        name = [[sub performSelector:@selector(name)] lowercaseString];
+                    }
+                    if (!name.length) continue;
+
+                    // Prefer communityIconURL (the large round icon), fall back to iconImageURL
+                    NSURL *iconURL = nil;
+                    if ([sub respondsToSelector:@selector(communityIconURL)]) {
+                        iconURL = [sub performSelector:@selector(communityIconURL)];
+                    }
+                    if (!iconURL && [sub respondsToSelector:@selector(iconImageURL)]) {
+                        iconURL = [sub performSelector:@selector(iconImageURL)];
+                    }
+
+                    NSString *scheme = iconURL.scheme.lowercaseString;
+                    if (iconURL && ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"])) {
+                        c[name] = iconURL;
+                        changed = YES;
+                    }
+                    // No valid URL: leave NSNull so we don't retry
+                }
+                if (changed) {
+                    [weakSelf.tableView reloadData];
+                }
+            });
+        }];
+    }
 }
 
 @end
