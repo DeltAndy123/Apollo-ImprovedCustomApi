@@ -1,6 +1,6 @@
 // MARK: - Saved Categories Sort Fix
 // This fixes a long-standing Apollo bug where saved categories appear in random order in various menus.
-// 
+//
 // Apollo iterates a Swift Dictionary to build the categories action sheet / context menu.
 // Swift Dictionary iteration order is non-deterministic (hash-based), so categories
 // appear in random order on each invocation. Two UI flows are affected:
@@ -10,11 +10,23 @@
 //
 // 2. UIContextMenu (SetSavedCategoryButton on the "Saved!" toast)
 //    Fix: wrap the actionProvider block to sort UIMenu children before display.
+//
+// MARK: - Change Category Context Menu
+// Adds a "Change Category" submenu to the long-press context menu for posts and comments
+// when the user is in the Saved posts/comments view. Selecting a category moves the item
+// to that category in the local NSUserDefaults database (same store Apollo reads from).
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #include <dlfcn.h>
+#import "ApolloCommon.h"
+
+
+// RDKThing provides fullName (the Reddit "t3_xxx" / "t1_xxx" identifier) on all content objects.
+@interface RDKThing : NSObject
+- (NSString *)fullName;
+@end
 
 // MARK: - ActionController In-Place Sort
 
@@ -105,9 +117,99 @@ static void sortActionControllerCategories(id actionController) {
     }
 }
 
+// MARK: - Saved Categories Database Helpers (for Change Category feature)
+
+static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
+static NSString *const kSavedItemsDBKey = @"SavedItemsCategoriesDatabase";
+
+// Returns sorted category names from the shared NSUserDefaults database.
+static NSArray<NSString *> *readSortedCategoryNames(void) {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName];
+    NSData *data = [d dataForKey:kSavedItemsDBKey];
+    if (!data) return @[];
+    NSError *err = nil;
+    NSDictionary *db = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (err || ![db[@"categories"] isKindOfClass:[NSDictionary class]]) return @[];
+    return [[db[@"categories"] allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+// Returns the category name that currently contains fullName, or nil if uncategorised.
+static NSString *currentCategoryForFullName(NSString *fullName) {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName];
+    NSData *data = [d dataForKey:kSavedItemsDBKey];
+    if (!data) return nil;
+    NSError *err = nil;
+    NSDictionary *db = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    if (err) return nil;
+    NSDictionary *cats = db[@"categories"];
+    for (NSString *cat in cats) {
+        if ([cats[cat] containsObject:fullName]) return cat;
+    }
+    return nil;
+}
+
+// Moves fullName out of any current category and into newCategory (nil = uncategorised).
+static void changeSavedItemCategory(NSString *fullName, NSString *newCategory) {
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName];
+    NSData *data = [d dataForKey:kSavedItemsDBKey];
+    if (!data) return;
+    NSError *err = nil;
+    NSMutableDictionary *db = [[NSJSONSerialization JSONObjectWithData:data
+                                                               options:NSJSONReadingMutableContainers
+                                                                 error:&err] mutableCopy];
+    if (err || !db) return;
+
+    NSMutableDictionary *cats = db[@"categories"];
+    if (!cats) return;
+
+    // Remove from all categories first.
+    for (NSString *cat in cats.allKeys) {
+        id rawItems = cats[cat];
+        NSMutableArray *items = [rawItems isKindOfClass:[NSMutableArray class]]
+            ? rawItems : [rawItems mutableCopy];
+        cats[cat] = items;
+        [items removeObject:fullName];
+    }
+
+    // Add to the chosen category.
+    if (newCategory && cats[newCategory]) {
+        NSMutableArray *items = cats[newCategory];
+        if (![items containsObject:fullName]) {
+            [items addObject:fullName];
+        }
+    }
+
+    NSData *newData = [NSJSONSerialization dataWithJSONObject:db options:0 error:&err];
+    if (!newData || err) return;
+    [d setObject:newData forKey:kSavedItemsDBKey];
+    [d synchronize];
+
+    ApolloLog(@"[SavedCategories] Moved %@ to category: %@", fullName, newCategory ?: @"(none)");
+}
+
+// MARK: - State flags
+
 static BOOL sSortNextActionController = NO;
+// Set to YES while SavedPostsCommentsViewController is the visible VC so that
+// the post/comment context menu hooks know to inject the Change Category submenu.
+static BOOL sSavedViewActive = NO;
+// Set to the fullName of the item being long-pressed when we want to inject
+// the Change Category submenu into the next UIContextMenuConfiguration creation.
+static NSString *sPendingCategoryFullName = nil;
+
+// MARK: - SavedPostsCommentsViewController hooks
 
 %hook _TtC6Apollo32SavedPostsCommentsViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    sSavedViewActive = YES;
+    %orig;
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    sSavedViewActive = NO;
+}
 
 - (void)savedCategoriesButtonTappedWithSender:(id)sender {
     sSortNextActionController = YES;
@@ -127,6 +229,50 @@ static BOOL sSortNextActionController = NO;
         sortActionControllerCategories(vc);
     }
     %orig;
+}
+
+%end
+
+// MARK: - Post context menu: inject Change Category
+
+%hook _TtC6Apollo19PostCellActionTaker
+
+- (UIContextMenuConfiguration *)contextMenuInteraction:(id)interaction configurationForMenuAtLocation:(CGPoint)location {
+    if (sSavedViewActive) {
+        Ivar linkIvar = class_getInstanceVariable(object_getClass(self), "link");
+        if (linkIvar) {
+            RDKThing *link = (__bridge RDKThing *)(__bridge void *)object_getIvar(self, linkIvar);
+            NSString *fullName = [link fullName];
+            if (fullName.length > 0) {
+                sPendingCategoryFullName = fullName;
+            }
+        }
+    }
+    UIContextMenuConfiguration *config = %orig;
+    sPendingCategoryFullName = nil;
+    return config;
+}
+
+%end
+
+// MARK: - Comment context menu: inject Change Category
+
+%hook _TtC6Apollo24CommentSectionController
+
+- (UIContextMenuConfiguration *)contextMenuInteraction:(id)interaction configurationForMenuAtLocation:(CGPoint)location {
+    if (sSavedViewActive) {
+        Ivar commentIvar = class_getInstanceVariable(object_getClass(self), "comment");
+        if (commentIvar) {
+            RDKThing *comment = (__bridge RDKThing *)(__bridge void *)object_getIvar(self, commentIvar);
+            NSString *fullName = [comment fullName];
+            if (fullName.length > 0) {
+                sPendingCategoryFullName = fullName;
+            }
+        }
+    }
+    UIContextMenuConfiguration *config = %orig;
+    sPendingCategoryFullName = nil;
+    return config;
 }
 
 %end
@@ -153,28 +299,84 @@ static BOOL sSortNextContextMenu = NO;
 %hook UIContextMenuConfiguration
 
 + (instancetype)configurationWithIdentifier:(id)identifier previewProvider:(id)previewProvider actionProvider:(UIMenu *(^)(NSArray<UIMenuElement *> *))actionProvider {
-    if (sSortNextContextMenu && actionProvider) {
-        sSortNextContextMenu = NO;
-        UIMenu *(^originalProvider)(NSArray<UIMenuElement *> *) = [actionProvider copy];
-        UIMenu *(^sortedProvider)(NSArray<UIMenuElement *> *) = ^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
-            UIMenu *menu = originalProvider(suggestedActions);
-            if (!menu) return menu;
-            NSArray<UIMenuElement *> *children = menu.children;
-            if (children.count < 3) return menu; // Need ≥2 categories + "Add"
+    BOOL doSort = sSortNextContextMenu && actionProvider != nil;
+    NSString *changeCategoryFullName = (sPendingCategoryFullName && actionProvider != nil)
+        ? [sPendingCategoryFullName copy] : nil;
 
-            // Last child is "Add Saved Category"
-            // Sort all preceding category actions alphabetically.
-            NSMutableArray<UIMenuElement *> *sortable = [[children subarrayWithRange:NSMakeRange(0, children.count - 1)] mutableCopy];
-            [sortable sortUsingComparator:^NSComparisonResult(UIMenuElement *a, UIMenuElement *b) {
-                return [a.title localizedCaseInsensitiveCompare:b.title];
-            }];
-            [sortable addObject:children.lastObject];
+    // Consume flags immediately so nested calls don't double-apply.
+    if (doSort) sSortNextContextMenu = NO;
+    if (changeCategoryFullName) sPendingCategoryFullName = nil;
 
-            return [UIMenu menuWithTitle:menu.title image:menu.image identifier:menu.identifier options:menu.options children:sortable];
-        };
-        return %orig(identifier, previewProvider, sortedProvider);
-    }
-    return %orig;
+    if (!doSort && !changeCategoryFullName) return %orig;
+
+    UIMenu *(^originalProvider)(NSArray<UIMenuElement *> *) = [actionProvider copy];
+    UIMenu *(^wrappedProvider)(NSArray<UIMenuElement *> *) = ^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+        UIMenu *menu = originalProvider(suggestedActions);
+        if (!menu) return menu;
+
+        NSArray<UIMenuElement *> *children = menu.children;
+
+        // Sort fix: alphabetise category children, keeping the last "Add" item fixed.
+        if (doSort) {
+            if (children.count >= 3) {
+                NSMutableArray<UIMenuElement *> *sortable = [[children subarrayWithRange:NSMakeRange(0, children.count - 1)] mutableCopy];
+                [sortable sortUsingComparator:^NSComparisonResult(UIMenuElement *a, UIMenuElement *b) {
+                    return [a.title localizedCaseInsensitiveCompare:b.title];
+                }];
+                [sortable addObject:children.lastObject];
+                children = sortable;
+                menu = [UIMenu menuWithTitle:menu.title image:menu.image identifier:menu.identifier options:menu.options children:children];
+            }
+        }
+
+        // Change Category fix: append a "Change Category" submenu.
+        if (changeCategoryFullName) {
+            NSArray<NSString *> *categories = readSortedCategoryNames();
+            if (categories.count > 0) {
+                NSString *currentCat = currentCategoryForFullName(changeCategoryFullName);
+                NSMutableArray<UIAction *> *catActions = [NSMutableArray array];
+
+                // "No Category" — removes the item from all categories.
+                UIAction *noCatAction = [UIAction
+                    actionWithTitle:@"No Category"
+                    image:[UIImage systemImageNamed:@"minus.circle"]
+                    identifier:nil
+                    handler:^(__kindof UIAction *a) {
+                        changeSavedItemCategory(changeCategoryFullName, nil);
+                    }];
+                noCatAction.state = (currentCat == nil) ? UIMenuElementStateOn : UIMenuElementStateOff;
+                [catActions addObject:noCatAction];
+
+                // One action per category; checkmark the current one.
+                for (NSString *cat in categories) {
+                    NSString *capturedCat = cat;
+                    UIAction *catAction = [UIAction
+                        actionWithTitle:cat
+                        image:nil
+                        identifier:nil
+                        handler:^(__kindof UIAction *a) {
+                            changeSavedItemCategory(changeCategoryFullName, capturedCat);
+                        }];
+                    catAction.state = ([cat isEqualToString:currentCat]) ? UIMenuElementStateOn : UIMenuElementStateOff;
+                    [catActions addObject:catAction];
+                }
+
+                UIMenu *changeCatMenu = [UIMenu
+                    menuWithTitle:@"Change Category"
+                    image:[UIImage systemImageNamed:@"folder"]
+                    identifier:nil
+                    options:0
+                    children:catActions];
+
+                NSMutableArray<UIMenuElement *> *newChildren = [children mutableCopy];
+                [newChildren addObject:changeCatMenu];
+                menu = [UIMenu menuWithTitle:menu.title image:menu.image identifier:menu.identifier options:menu.options children:newChildren];
+            }
+        }
+
+        return menu;
+    };
+    return %orig(identifier, previewProvider, wrappedProvider);
 }
 
 %end
