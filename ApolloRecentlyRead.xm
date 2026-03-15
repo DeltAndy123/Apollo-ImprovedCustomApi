@@ -1034,6 +1034,19 @@ static UIColor *RecentlyReadMetaColor(void) {
 // MARK: - Subreddit Icon Loading
 
 - (void)configureSubredditIconView:(UIImageView *)iconView subredditName:(NSString *)subredditName {
+    // Respect Apollo's native "Show Subreddit Icons" setting (Posts > Appearance)
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"ShowSubredditIconsForPosts"]) {
+        NSURLSessionDataTask *oldTask = objc_getAssociatedObject(iconView, &kSubIconTaskKey);
+        if (oldTask) {
+            [oldTask cancel];
+            objc_setAssociatedObject(iconView, &kSubIconTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        objc_setAssociatedObject(iconView, &kSubIconURLKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        iconView.image = nil;
+        iconView.hidden = YES;
+        return;
+    }
+
     // Cancel any pending task
     NSURLSessionDataTask *oldTask = objc_getAssociatedObject(iconView, &kSubIconTaskKey);
     if (oldTask) {
