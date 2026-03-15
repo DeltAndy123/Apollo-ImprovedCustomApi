@@ -192,6 +192,67 @@ NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url) {
     return components.URL;
 }
 
+// MARK: - Saved Category Icons
+
+static NSString *const kCategoryIconsSuiteName = @"group.com.christianselig.apollo";
+static NSString *const kCategoryIconsDefaultsKey = @"SavedItemsCategoryIcons";
+
+// Returns a mutable dict of {categoryName -> sfSymbolName}, or an empty dict.
+static NSMutableDictionary<NSString *, NSString *> *LoadCategoryIcons(NSUserDefaults *defaults) {
+    NSData *data = [defaults dataForKey:kCategoryIconsDefaultsKey];
+    if (!data) return [NSMutableDictionary dictionary];
+    NSError *err = nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data
+                                             options:NSJSONReadingMutableContainers
+                                               error:&err];
+    if (err || ![json isKindOfClass:[NSDictionary class]]) return [NSMutableDictionary dictionary];
+    return [json mutableCopy];
+}
+
+static void SaveCategoryIcons(NSMutableDictionary *icons, NSUserDefaults *defaults) {
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:icons options:0 error:&err];
+    if (!err && data) {
+        [defaults setObject:data forKey:kCategoryIconsDefaultsKey];
+        [defaults synchronize];
+    }
+}
+
+NSString *ApolloIconForCategory(NSString *categoryName) {
+    if (!categoryName) return nil;
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kCategoryIconsSuiteName];
+    NSMutableDictionary *icons = LoadCategoryIcons(d);
+    NSString *sym = icons[categoryName];
+    return ([sym isKindOfClass:[NSString class]] && sym.length > 0) ? sym : nil;
+}
+
+void ApolloSetIconForCategory(NSString *categoryName, NSString *symbolName) {
+    if (!categoryName) return;
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kCategoryIconsSuiteName];
+    NSMutableDictionary *icons = LoadCategoryIcons(d);
+    if (symbolName.length > 0) {
+        icons[categoryName] = symbolName;
+    } else {
+        [icons removeObjectForKey:categoryName];
+    }
+    SaveCategoryIcons(icons, d);
+}
+
+void ApolloRemoveIconForCategory(NSString *categoryName) {
+    ApolloSetIconForCategory(categoryName, nil);
+}
+
+void ApolloRenameIconForCategory(NSString *oldName, NSString *newName) {
+    if (!oldName || !newName) return;
+    NSString *icon = ApolloIconForCategory(oldName);
+    if (!icon) return;
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kCategoryIconsSuiteName];
+    NSMutableDictionary *icons = LoadCategoryIcons(d);
+    [icons removeObjectForKey:oldName];
+    icons[newName] = icon;
+    SaveCategoryIcons(icons, d);
+}
+
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL) {
     NSURL *apolloURL = ApolloURLByConvertingResolvedURLToApolloScheme(resolvedURL);
     if (![apolloURL isKindOfClass:[NSURL class]]) {

@@ -16,4 +16,12 @@ BOOL IsLiquidGlass(void);
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);
+
+// Saved category icon helpers.
+// Icons are stored as a separate JSON dict in the shared NSUserDefaults suite,
+// keyed by category name. Values are SF Symbol system names.
+NSString *ApolloIconForCategory(NSString *categoryName);
+void ApolloSetIconForCategory(NSString *categoryName, NSString *symbolName);
+void ApolloRemoveIconForCategory(NSString *categoryName);
+void ApolloRenameIconForCategory(NSString *oldName, NSString *newName);
 __END_DECLS

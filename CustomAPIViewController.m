@@ -196,7 +196,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 5; // 4 text fields + Instructions
-        case SectionGeneral: return 5;
+        case SectionGeneral: return 6;
         case SectionMedia: return 2;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
@@ -480,6 +480,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Open Steam Links in App"
                                                on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
                                            action:@selector(steamAppSwitchToggled:)];
+        case 5:
+            return [self switchCellWithIdentifier:@"Cell_Gen_SavedCategoryBadge"
+                                            label:@"Save Category Badges"
+                                               on:[defaults boolForKey:UDKeyShowSavedCategoryBadge]
+                                           action:@selector(showSavedCategoryBadgeSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -937,6 +942,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)steamAppSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyOpenLinksInSteamApp];
+}
+
+- (void)showSavedCategoryBadgeSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowSavedCategoryBadge];
 }
 
 #pragma mark - Backup / Restore
