@@ -11,6 +11,7 @@
 typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionBackupRestore = 0,
     SectionAPIKeys,
+    SectionNotifications,
     SectionGeneral,
     SectionMedia,
     SectionSubreddits,
@@ -31,6 +32,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     TagRandNsfwSubredditsSource,
     TagTrendingLimit,
     TagReadPostMaxCount,
+    TagPushNotificationServer,
 };
 
 #pragma mark - Helpers
@@ -196,6 +198,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 5; // 4 text fields + Instructions
+        case SectionNotifications: return 1;
         case SectionGeneral: return 6;
         case SectionMedia: return 2;
         case SectionSubreddits: return 5;
@@ -209,6 +212,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return @"Backup / Restore";
         case SectionAPIKeys: return @"API Keys";
+        case SectionNotifications: return @"Push Notifications";
         case SectionGeneral: return @"General";
         case SectionMedia: return @"Media";
         case SectionSubreddits: return @"Subreddits";
@@ -222,6 +226,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (indexPath.section) {
         case SectionBackupRestore: return [self backupRestoreCellForRow:indexPath.row tableView:tableView];
         case SectionAPIKeys: return [self apiKeyCellForRow:indexPath.row tableView:tableView];
+        case SectionNotifications: return [self notificationCellForRow:indexPath.row tableView:tableView];
         case SectionGeneral: return [self generalCellForRow:indexPath.row tableView:tableView];
         case SectionMedia: return [self mediaCellForRow:indexPath.row tableView:tableView];
         case SectionSubreddits: return [self subredditCellForRow:indexPath.row tableView:tableView];
@@ -448,6 +453,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
+- (UITableViewCell *)notificationCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0:
+            return [self stackedTextFieldCellWithIdentifier:@"Cell_Notif_Server"
+                                                     label:@"Push Server URL"
+                                               placeholder:@"https://apollonotifications.com"
+                                                      text:sPushNotificationServer
+                                                       tag:TagPushNotificationServer];
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
 - (UITableViewCell *)generalCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     switch (row) {
@@ -652,6 +669,14 @@ typedef NS_ENUM(NSInteger, Tag) {
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"more info"
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi?tab=readme-ov-file#dont-have-an-api-key"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")."
+            attributes:plainAttrs]];
+    } else if (section == SectionNotifications) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Base URL of your self-hosted apollo-backend instance (e.g. https://your-server.com). Leave empty to use the original apollonotifications.com. See the "
+            attributes:plainAttrs];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"apollo-backend repo"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/christianselig/apollo-backend"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" for self-hosting instructions."
             attributes:plainAttrs]];
     } else if (section == SectionSubreddits) {
         text = [[NSMutableAttributedString alloc]
@@ -917,6 +942,14 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sReadPostMaxCount = [textField.text integerValue];
         [[NSUserDefaults standardUserDefaults] setInteger:sReadPostMaxCount forKey:UDKeyReadPostMaxCount];
+    } else if (textField.tag == TagPushNotificationServer) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        // Strip trailing slash so URL concatenation with paths works cleanly
+        while ([textField.text hasSuffix:@"/"]) {
+            textField.text = [textField.text substringToIndex:textField.text.length - 1];
+        }
+        sPushNotificationServer = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sPushNotificationServer forKey:UDKeyPushNotificationServer];
     }
 }
 
@@ -1151,6 +1184,7 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     sShowRecentlyReadThumbnails = [defaults boolForKey:UDKeyShowRecentlyReadThumbnails];
     sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sUnmuteCommentsVideos = [defaults integerForKey:UDKeyUnmuteCommentsVideos];
+    sPushNotificationServer = [defaults stringForKey:UDKeyPushNotificationServer];
 
     // Restore group preferences, preserving account state from current install
     NSString *groupPlistBackupPath = [extractDir stringByAppendingPathComponent:kGroupPlistFilename];

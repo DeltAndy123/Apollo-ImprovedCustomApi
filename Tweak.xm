@@ -143,6 +143,39 @@ static int uname_replacement(struct utsname *buf) {
     return ret;
 }
 
+// On sideloaded apps, appStoreReceiptURL returns a path inside the app bundle where
+// no StoreReceipt file exists. Apollo's fetchReceiptData reads NSData from that URL;
+// when the read fails it calls resume(throwing:) → "Unable to retrieve receipt…".
+// Fix: redirect appStoreReceiptURL to a writable file we create so the NSData read
+// succeeds (returns empty Data). Apollo's success path then POSTs the (empty) receipt
+// to our custom server, which ignores the body and always returns LIFETIME.
+%hook NSBundle
+
+- (NSURL *)appStoreReceiptURL {
+    if (self != [NSBundle mainBundle]) {
+        return %orig;
+    }
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *fakeReceiptPath = [[paths firstObject] stringByAppendingPathComponent:@"FakeSideloadReceipt"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:fakeReceiptPath]) {
+        [[NSFileManager defaultManager] createFileAtPath:fakeReceiptPath contents:[NSData data] attributes:nil];
+    }
+    return [NSURL fileURLWithPath:fakeReceiptPath];
+}
+
+%end
+
+// The fake receipt file created above satisfies Apollo's "receipt file exists → show
+// rating prompt" check (sub_1007596c0), causing the prompt to appear on every launch.
+// Suppress it entirely on sideloaded builds.
+%hook SKStoreReviewController
+
++ (void)requestReviewInScene:(id)scene {
+    // No-op: suppress rating prompt triggered by fake receipt file presence
+}
+
+%end
+
 // MARK: - API / Network
 
 static NSString *const announcementUrl = @"apollogur.download/api/apollonouncement";
@@ -515,6 +548,23 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
         [mutableRequest setValue:customUA forHTTPHeaderField:@"User-Agent"];
         [self setValue:mutableRequest forKey:@"_originalRequest"];
         [self setValue:mutableRequest forKey:@"_currentRequest"];
+    } else if (([requestURL.host isEqualToString:@"apollonotifications.com"] ||
+                [requestURL.host isEqualToString:@"beta.apollonotifications.com"]) &&
+               [sPushNotificationServer length] > 0) {
+        // Redirect to user-configured self-hosted backend, preserving path+query
+        NSURLComponents *components = [NSURLComponents componentsWithURL:requestURL resolvingAgainstBaseURL:NO];
+        NSURL *customBase = [NSURL URLWithString:sPushNotificationServer];
+        components.scheme = customBase.scheme;
+        components.host = customBase.host;
+        components.port = customBase.port;
+        NSURL *newURL = components.URL;
+        if (newURL) {
+            NSMutableURLRequest *mutableRequest = [request mutableCopy];
+            [mutableRequest setURL:newURL];
+            [self setValue:mutableRequest forKey:@"_originalRequest"];
+            [self setValue:mutableRequest forKey:@"_currentRequest"];
+            ApolloLog(@"[PushNotifications] Redirected %@ -> %@", requestURL.absoluteString, newURL.absoluteString);
+        }
     }
 
     %orig;
@@ -699,6 +749,7 @@ static void initializeRandomSources() {
     sRandNsfwSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRandNsfwSubredditsSource];
     sTrendingSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsSource];
     sTrendingSubredditsLimit = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsLimit];
+    sPushNotificationServer = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyPushNotificationServer];
 
     %init;
 
