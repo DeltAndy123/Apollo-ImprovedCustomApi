@@ -20,6 +20,21 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionCount
 };
 
+@interface PaddedLabel : UILabel
+@end
+@implementation PaddedLabel
+static const UIEdgeInsets kPaddedLabelInsets = {2, 6, 2, 6};
+- (void)drawTextInRect:(CGRect)rect {
+    [super drawTextInRect:UIEdgeInsetsInsetRect(rect, kPaddedLabelInsets)];
+}
+- (CGSize)intrinsicContentSize {
+    CGSize s = [super intrinsicContentSize];
+    s.width  += kPaddedLabelInsets.left + kPaddedLabelInsets.right;
+    s.height += kPaddedLabelInsets.top  + kPaddedLabelInsets.bottom;
+    return s;
+}
+@end
+
 @implementation CustomAPIViewController
 
 typedef NS_ENUM(NSInteger, Tag) {
@@ -35,6 +50,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     TagPushNotificationServer,
     TagServerToken,
 };
+
+typedef NS_ENUM(NSInteger, BundleIdCheckState) {
+    BundleIdCheckStateNone = 0,
+    BundleIdCheckStateChecking,
+    BundleIdCheckStateMatched,
+    BundleIdCheckStateMismatched,
+    BundleIdCheckStateFailed,
+};
+
+static const NSInteger kBundleIdStatusLabelTag = 9030;
+static BundleIdCheckState sBundleIdCheckState = BundleIdCheckStateNone;
+static NSString *sServerReturnedBundleId = nil;
 
 #pragma mark - Helpers
 
@@ -187,6 +214,11 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     self.title = @"Custom API";
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+
+    // Check saved push server URL on open so the bundle ID indicator is current
+    if (sPushNotificationServer.length > 0) {
+        [self checkPushServerBundleId];
+    }
 }
 
 #pragma mark - UITableViewDataSource
@@ -457,11 +489,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (UITableViewCell *)notificationCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     switch (row) {
         case 0:
-            return [self stackedTextFieldCellWithIdentifier:@"Cell_Notif_Server"
-                                                     label:@"Push Server URL"
-                                               placeholder:@"https://apollonotifications.com"
-                                                      text:sPushNotificationServer
-                                                       tag:TagPushNotificationServer];
+            return [self pushServerURLCellForTableView:tableView];
         case 1:
             return [self serverTokenCell];
         default: return [[UITableViewCell alloc] init];
@@ -533,6 +561,214 @@ typedef NS_ENUM(NSInteger, Tag) {
     sServerToken = [token copy];
     [[NSUserDefaults standardUserDefaults] setValue:sServerToken forKey:UDKeyServerToken];
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SectionNotifications] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+#pragma mark - Push Server Bundle ID Check
+
+- (UITableViewCell *)pushServerURLCellForTableView:(UITableView *)tableView {
+    static NSString *const identifier = @"Cell_Notif_Server_v2";
+
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.hidden = YES;
+
+        UILabel *captionLabel = [[UILabel alloc] init];
+        captionLabel.tag = 9000;
+        captionLabel.text = @"Push Server URL";
+        captionLabel.font = [UIFont systemFontOfSize:17];
+        [captionLabel setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+        captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UILabel *statusLabel = [[PaddedLabel alloc] init];
+        statusLabel.tag = kBundleIdStatusLabelTag;
+        statusLabel.font = [UIFont systemFontOfSize:12];
+        statusLabel.textAlignment = NSTextAlignmentRight;
+        [statusLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [statusLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        statusLabel.userInteractionEnabled = YES;
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(bundleIdStatusLabelTapped)];
+        [statusLabel addGestureRecognizer:tap];
+
+        UITextField *textField = [[UITextField alloc] init];
+        textField.tag = TagPushNotificationServer;
+        textField.delegate = self;
+        textField.font = [UIFont systemFontOfSize:16];
+        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.returnKeyType = UIReturnKeyDone;
+        textField.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [cell.contentView addSubview:captionLabel];
+        [cell.contentView addSubview:statusLabel];
+        [cell.contentView addSubview:textField];
+
+        UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            // Caption on left, status indicator on right — vertically aligned
+            [captionLabel.topAnchor constraintEqualToAnchor:margins.topAnchor],
+            [captionLabel.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+            [captionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:statusLabel.leadingAnchor constant:-8],
+            [captionLabel.centerYAnchor constraintEqualToAnchor:statusLabel.centerYAnchor],
+
+            [statusLabel.topAnchor constraintEqualToAnchor:margins.topAnchor],
+            [statusLabel.trailingAnchor constraintLessThanOrEqualToAnchor:margins.trailingAnchor],
+
+            // Text field below the label row
+            [textField.topAnchor constraintEqualToAnchor:captionLabel.bottomAnchor constant:4],
+            [textField.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+            [textField.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+            [textField.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
+        ]];
+    }
+
+    UITextField *textField = (UITextField *)[cell.contentView viewWithTag:TagPushNotificationServer];
+    textField.text = sPushNotificationServer;
+    textField.placeholder = @"https://apollonotifications.com";
+    textField.adjustsFontSizeToFitWidth = YES;
+    textField.minimumFontSize = 12;
+
+    [self updateBundleIdStatusLabel:(UILabel *)[cell.contentView viewWithTag:kBundleIdStatusLabelTag]];
+
+    return cell;
+}
+
+- (void)updateBundleIdStatusLabel:(UILabel *)label {
+    if (!label) return;
+    BOOL hasInfo = NO;
+    switch (sBundleIdCheckState) {
+        case BundleIdCheckStateNone:
+            label.text = @"";
+            label.backgroundColor = [UIColor clearColor];
+            break;
+        case BundleIdCheckStateChecking:
+            label.text = @"Checking...";
+            label.textColor = [UIColor secondaryLabelColor];
+            label.backgroundColor = [[UIColor secondaryLabelColor] colorWithAlphaComponent:0.1];
+            hasInfo = YES;
+            break;
+        case BundleIdCheckStateMatched:
+            label.text = @"✓ Bundle ID match";
+            label.textColor = [UIColor systemGreenColor];
+            label.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.1];
+            hasInfo = YES;
+            break;
+        case BundleIdCheckStateMismatched:
+            label.text = @"✗ Bundle ID mismatch";
+            label.textColor = [UIColor systemRedColor];
+            label.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.1];
+            hasInfo = YES;
+            break;
+        case BundleIdCheckStateFailed:
+            label.text = @"⚠ Check failed";
+            label.textColor = [UIColor systemOrangeColor];
+            label.backgroundColor = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.1];
+            hasInfo = YES;
+            break;
+    }
+    label.userInteractionEnabled = hasInfo;
+    label.layer.cornerRadius = hasInfo ? 4 : 0;
+    label.layer.masksToBounds = YES;
+}
+
+- (void)refreshPushServerCell {
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:0 inSection:SectionNotifications];
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:indexPath];
+    if (cell) {
+        [self updateBundleIdStatusLabel:(UILabel *)[cell.contentView viewWithTag:kBundleIdStatusLabelTag]];
+    }
+}
+
+- (void)bundleIdStatusLabelTapped {
+    NSString *title = nil;
+    NSString *message = nil;
+    NSString *appBundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"(unknown)";
+
+    switch (sBundleIdCheckState) {
+        case BundleIdCheckStateNone:
+            return;
+        case BundleIdCheckStateChecking:
+            title = @"Checking Server";
+            message = [NSString stringWithFormat:@"Verifying that the push server's bundle ID matches this app.\n\nApp bundle ID:\n%@", appBundleId];
+            break;
+        case BundleIdCheckStateMatched:
+            title = @"Bundle ID Match";
+            message = [NSString stringWithFormat:@"The push server's bundle ID matches this app.\n\nBundle ID:\n%@", appBundleId];
+            break;
+        case BundleIdCheckStateMismatched:
+            title = @"Bundle ID Mismatch";
+            message = [NSString stringWithFormat:@"The push server is configured for a different app and won't deliver notifications to this one.\n\nServer bundle ID:\n%@\n\nApp bundle ID:\n%@",
+                       sServerReturnedBundleId ?: @"(unknown)", appBundleId];
+            break;
+        case BundleIdCheckStateFailed:
+            title = @"Check Failed";
+            message = [NSString stringWithFormat:@"Could not reach the push server to verify its bundle ID. Make sure the server URL is correct and the server is running.\n\nApp bundle ID:\n%@", appBundleId];
+            break;
+    }
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)checkPushServerBundleId {
+    NSString *serverURL = sPushNotificationServer;
+    if (serverURL.length == 0) {
+        sBundleIdCheckState = BundleIdCheckStateNone;
+        sServerReturnedBundleId = nil;
+        [self refreshPushServerCell];
+        return;
+    }
+
+    sBundleIdCheckState = BundleIdCheckStateChecking;
+    [self refreshPushServerCell];
+
+    NSURL *url = [NSURL URLWithString:[serverURL stringByAppendingString:@"/v1/bundle_id"]];
+    if (!url) {
+        sBundleIdCheckState = BundleIdCheckStateFailed;
+        [self refreshPushServerCell];
+        return;
+    }
+
+    ApolloLog(@"[BundleIdCheck] Checking %@", url);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Discard stale response if URL changed while the request was in flight
+            if (![serverURL isEqualToString:sPushNotificationServer]) return;
+
+            if (error || !data) {
+                ApolloLog(@"[BundleIdCheck] Request failed: %@", error);
+                sBundleIdCheckState = BundleIdCheckStateFailed;
+                sServerReturnedBundleId = nil;
+                [self refreshPushServerCell];
+                return;
+            }
+
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSString *serverBundleId = json[@"bundle_id"];
+            if (!serverBundleId) {
+                ApolloLog(@"[BundleIdCheck] No bundle_id in response: %@", json);
+                sBundleIdCheckState = BundleIdCheckStateFailed;
+                sServerReturnedBundleId = nil;
+                [self refreshPushServerCell];
+                return;
+            }
+
+            sServerReturnedBundleId = serverBundleId;
+            NSString *appBundleId = [[NSBundle mainBundle] bundleIdentifier];
+            sBundleIdCheckState = [serverBundleId isEqualToString:appBundleId]
+                ? BundleIdCheckStateMatched
+                : BundleIdCheckStateMismatched;
+            ApolloLog(@"[BundleIdCheck] Server=%@ App=%@ Match=%d", serverBundleId, appBundleId, sBundleIdCheckState == BundleIdCheckStateMatched);
+            [self refreshPushServerCell];
+        });
+    }];
+    [task resume];
 }
 
 - (UITableViewCell *)generalCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
@@ -744,8 +980,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Base URL of your self-hosted apollo-backend instance (e.g. https://your-server.com). Leave empty to use the original apollonotifications.com. See the "
             attributes:plainAttrs];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"apollo-backend repo"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/christianselig/apollo-backend"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"forked apollo-backend repo"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/DeltAndy123/apollo-backend"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" for self-hosting instructions."
             attributes:plainAttrs]];
     } else if (section == SectionSubreddits) {
@@ -1020,6 +1256,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
         sPushNotificationServer = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sPushNotificationServer forKey:UDKeyPushNotificationServer];
+        [self checkPushServerBundleId];
     } else if (textField.tag == TagServerToken) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sServerToken = textField.text;

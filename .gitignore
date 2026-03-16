@@ -10,3 +10,4 @@ data/
 .claude/
 Apollo
 .cache
+.DS_STORE
