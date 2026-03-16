@@ -561,6 +561,9 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
         if (newURL) {
             NSMutableURLRequest *mutableRequest = [request mutableCopy];
             [mutableRequest setURL:newURL];
+            if ([sServerToken length] > 0) {
+                [mutableRequest setValue:sServerToken forHTTPHeaderField:@"X-Apollo-Token"];
+            }
             [self setValue:mutableRequest forKey:@"_originalRequest"];
             [self setValue:mutableRequest forKey:@"_currentRequest"];
             ApolloLog(@"[PushNotifications] Redirected %@ -> %@", requestURL.absoluteString, newURL.absoluteString);
@@ -750,6 +753,7 @@ static void initializeRandomSources() {
     sTrendingSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsSource];
     sTrendingSubredditsLimit = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsLimit];
     sPushNotificationServer = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyPushNotificationServer];
+    sServerToken = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyServerToken];
 
     %init;
 

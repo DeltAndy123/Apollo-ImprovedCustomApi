@@ -33,6 +33,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     TagTrendingLimit,
     TagReadPostMaxCount,
     TagPushNotificationServer,
+    TagServerToken,
 };
 
 #pragma mark - Helpers
@@ -198,7 +199,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 5; // 4 text fields + Instructions
-        case SectionNotifications: return 1;
+        case SectionNotifications: return 2;
         case SectionGeneral: return 6;
         case SectionMedia: return 2;
         case SectionSubreddits: return 5;
@@ -461,8 +462,77 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                placeholder:@"https://apollonotifications.com"
                                                       text:sPushNotificationServer
                                                        tag:TagPushNotificationServer];
+        case 1:
+            return [self serverTokenCell];
         default: return [[UITableViewCell alloc] init];
     }
+}
+
+- (UITableViewCell *)serverTokenCell {
+    static NSString *identifier = @"Cell_Notif_Token";
+    static const NSInteger kLabelTag = 9010;
+    static const NSInteger kFieldTag = TagServerToken;
+
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.hidden = YES;
+
+        UILabel *captionLabel = [[UILabel alloc] init];
+        captionLabel.tag = kLabelTag;
+        captionLabel.text = @"Server Secret Token";
+        captionLabel.font = [UIFont systemFontOfSize:17];
+        captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+        UIButton *generateButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [generateButton setTitle:@"Generate" forState:UIControlStateNormal];
+        generateButton.titleLabel.font = [UIFont systemFontOfSize:14];
+        [generateButton addTarget:self action:@selector(generateServerToken:) forControlEvents:UIControlEventTouchUpInside];
+        [generateButton sizeToFit];
+
+        UITextField *textField = [[UITextField alloc] init];
+        textField.tag = kFieldTag;
+        textField.delegate = self;
+        textField.font = [UIFont systemFontOfSize:16];
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.returnKeyType = UIReturnKeyDone;
+        textField.placeholder = @"Leave empty if not needed";
+        textField.rightView = generateButton;
+        textField.rightViewMode = UITextFieldViewModeAlways;
+        textField.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [cell.contentView addSubview:captionLabel];
+        [cell.contentView addSubview:textField];
+
+        UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [captionLabel.topAnchor constraintEqualToAnchor:margins.topAnchor],
+            [captionLabel.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+            [captionLabel.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+            [textField.topAnchor constraintEqualToAnchor:captionLabel.bottomAnchor constant:4],
+            [textField.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+            [textField.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+            [textField.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
+        ]];
+    }
+
+    UITextField *textField = (UITextField *)[cell.contentView viewWithTag:kFieldTag];
+    textField.text = sServerToken;
+
+    return cell;
+}
+
+- (void)generateServerToken:(id)sender {
+    // Generate 32 random hex bytes (64 character token)
+    NSMutableString *token = [NSMutableString stringWithCapacity:64];
+    for (int i = 0; i < 32; i++) {
+        [token appendFormat:@"%02x", arc4random_uniform(256)];
+    }
+    sServerToken = [token copy];
+    [[NSUserDefaults standardUserDefaults] setValue:sServerToken forKey:UDKeyServerToken];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SectionNotifications] withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (UITableViewCell *)generalCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
@@ -950,6 +1020,10 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
         sPushNotificationServer = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sPushNotificationServer forKey:UDKeyPushNotificationServer];
+    } else if (textField.tag == TagServerToken) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        sServerToken = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sServerToken forKey:UDKeyServerToken];
     }
 }
 
@@ -1185,6 +1259,7 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sUnmuteCommentsVideos = [defaults integerForKey:UDKeyUnmuteCommentsVideos];
     sPushNotificationServer = [defaults stringForKey:UDKeyPushNotificationServer];
+    sServerToken = [defaults stringForKey:UDKeyServerToken];
 
     // Restore group preferences, preserving account state from current install
     NSString *groupPlistBackupPath = [extractDir stringByAppendingPathComponent:kGroupPlistFilename];

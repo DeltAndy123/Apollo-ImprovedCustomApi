@@ -19,3 +19,4 @@ extern NSInteger sReadPostMaxCount;
 extern NSInteger sUnmuteCommentsVideos;
 
 extern NSString *sPushNotificationServer;
+extern NSString *sServerToken;
