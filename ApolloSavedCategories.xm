@@ -270,9 +270,11 @@ __attribute__((naked)) static void _apolloToastTrampoline(
     );
 }
 
-// Show Apollo's "Added new category!" toast via the Holla singleton.
+// Show Apollo's category toast via the Holla singleton.
+// Pass savedToCategory=YES to show "Saved to new category!" (when the item was
+// also auto-assigned), or NO to show "Added new category!" (category created alone).
 // Must be called on the main thread.
-static void apolloShowAddedCategoryToast(void) {
+static void apolloShowCategoryToast(BOOL savedToCategory) {
     // Image 0 is always the main executable (Apollo) when running inside the app.
     uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
 
@@ -295,23 +297,30 @@ static void apolloShowAddedCategoryToast(void) {
         return;
     }
 
-    // Build the Swift String for "Added new category!" (19 chars, immortal ASCII).
-    // The UTF-8 content lives at Hopper address 0x100a73f40.
     // Swift large string layout: word2 = (content_ptr - 0x20) | 0x8000000000000000
-    uintptr_t contentAddr = 0x100a73f40 + slide;
-    uint64_t sw1 = 0xd000000000000013ULL;  // discriminant 0xd0, length 19 = 0x13
+    // "Added new category!"  — 19 chars (0x13), Hopper 0x100a73f40
+    // "Saved to new category!" — 22 chars (0x16), Hopper 0x100a6bc80
+    uintptr_t contentAddr;
+    uint64_t sw1;
+    if (savedToCategory) {
+        contentAddr = 0x100a6bc80 + slide;
+        sw1 = 0xd000000000000016ULL;  // discriminant 0xd0, length 22 = 0x16
+        ApolloLog(@"[SavedCategories] Showing 'Saved to new category!' toast");
+    } else {
+        contentAddr = 0x100a73f40 + slide;
+        sw1 = 0xd000000000000013ULL;  // discriminant 0xd0, length 19 = 0x13
+        ApolloLog(@"[SavedCategories] Showing 'Added new category!' toast");
+    }
     uint64_t sw2 = (contentAddr - 0x20) | 0x8000000000000000ULL;
 
     void *funcPtr = (void *)(0x100518214 + slide);
-
-    ApolloLog(@"[SavedCategories] Showing 'Added new category!' toast");
     _apolloToastTrampoline(hollaInstance, funcPtr, sw1, sw2);
 }
 
 // Creates a new category with the given name and optional SF Symbol icon.
 // Mirrors the logic in SavedCategoriesViewController.addCategory so both the
 // settings screen and the in-app shortcut write to the same database.
-static void createSavedCategory(NSString *name, NSString *iconName) {
+static void createSavedCategory(NSString *name, NSString *iconName, BOOL savedToCategory) {
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName];
     NSData *data = [d dataForKey:kSavedItemsDBKey];
     NSError *err = nil;
@@ -328,9 +337,126 @@ static void createSavedCategory(NSString *name, NSString *iconName) {
     ApolloLog(@"[SavedCategories] Created category: %@ icon: %@", name, iconName ?: @"(none)");
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloFixSavedCategoryChanged" object:nil];
-        apolloShowAddedCategoryToast();
+        apolloShowCategoryToast(savedToCategory);
     });
 }
+
+// MARK: - Toast fullName capture
+//
+// When "Add Saved Category" is tapped from the toast's long-press context menu,
+// Apollo presents the "New Saved Category" alert from a closure that captured a
+// weak reference to HollaSavedItemStatusView. That view's savedItemFullName ivar
+// holds the Reddit fullName of the item being saved. We read it here so our
+// replacement AddCategoryViewController can auto-assign the item to the new
+// category — matching Apollo's native "Saved to new category!" behaviour.
+
+static NSString *hollaFullName(id view) {
+    Ivar ivar = class_getInstanceVariable(object_getClass(view), "savedItemFullName");
+    if (!ivar) return nil;
+    uint8_t *base = (uint8_t *)(__bridge void *)view + ivar_getOffset(ivar);
+    uint64_t w0, w1;
+    memcpy(&w0, base, sizeof(uint64_t));
+    memcpy(&w1, base + sizeof(uint64_t), sizeof(uint64_t));
+    return decodeSwiftString(w0, w1);
+}
+
+static NSString *findHollaFullName(UIView *view, Class hollaClass) {
+    if (!view) return nil;
+    if ([view isKindOfClass:hollaClass]) {
+        NSString *fn = hollaFullName(view);
+        if (fn.length > 0) return fn;
+    }
+    for (UIView *sub in view.subviews) {
+        NSString *result = findHollaFullName(sub, hollaClass);
+        if (result) return result;
+    }
+    return nil;
+}
+
+// MARK: - Category Picker Sheet
+//
+// Presented when the user taps "Change Category" in the 3-dot ActionController.
+// Uses UISheetPresentationController (iOS 15+) so it slides up as a native
+// bottom sheet rather than a UIAlertController popup.
+
+@interface ApolloFixCategoryPickerVC : UITableViewController
+@property (nonatomic, copy) NSString *fullName;
+@property (nonatomic, copy) NSArray<NSString *> *categories;
+@property (nonatomic, copy) NSString *currentCategory;
+@end
+
+@implementation ApolloFixCategoryPickerVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"ApolloFixCatCell"];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return 2;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    return section == 0 ? @"Change Category" : nil;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    // Section 0: "No Category" + all categories. Section 1: "Add Category".
+    return section == 0 ? 1 + (NSInteger)self.categories.count : 1;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ApolloFixCatCell" forIndexPath:indexPath];
+    if (indexPath.section == 1) {
+        cell.textLabel.text = @"Add Category";
+        cell.imageView.image = [UIImage systemImageNamed:@"plus"];
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        return cell;
+    }
+    NSString *title;
+    NSString *symbolName = nil;
+    BOOL isCurrent;
+    if (indexPath.row == 0) {
+        title = @"No Category";
+        isCurrent = (self.currentCategory == nil);
+        symbolName = @"minus.circle";
+    } else {
+        title = self.categories[indexPath.row - 1];
+        isCurrent = [title isEqualToString:self.currentCategory];
+        symbolName = ApolloIconForCategory(title);
+    }
+    cell.textLabel.text = title;
+    cell.accessoryType = isCurrent ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    cell.imageView.image = symbolName ? [UIImage systemImageNamed:symbolName] : nil;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 1) {
+        // Present AddCategoryViewController on top of this sheet; refresh list on completion.
+        AddCategoryViewController *addVC = [[AddCategoryViewController alloc] init];
+        addVC.existingCategoryNames = readSortedCategoryNames();
+        __weak ApolloFixCategoryPickerVC *weakSelf = self;
+        addVC.completionHandler = ^(NSString *name, NSString *iconName) {
+            createSavedCategory(name, iconName, NO);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ApolloFixCategoryPickerVC *s = weakSelf;
+                if (!s) return;
+                s.categories = readSortedCategoryNames();
+                [s.tableView reloadData];
+            });
+        };
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:addVC];
+        [self presentViewController:nav animated:YES completion:nil];
+        return;
+    }
+    NSString *cat = (indexPath.row == 0) ? nil : self.categories[indexPath.row - 1];
+    changeSavedItemCategory(self.fullName, cat);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
 
 // MARK: - State flags
 
@@ -341,6 +467,18 @@ static BOOL sSavedViewActive = NO;
 // Set to the fullName of the item being long-pressed when we want to inject
 // the Change Category submenu into the next UIContextMenuConfiguration creation.
 static NSString *sPendingCategoryFullName = nil;
+// Set to the fullName when the 3-dot ActionController is about to be presented,
+// so we can inject a "Change Category" row into it.
+static NSString *sPendingACFullName = nil;
+
+// Associated object keys for ActionController row injection.
+static const void *kACFullNameKey      = &kACFullNameKey;      // NSString fullName stored on AC
+static const void *kACInjectedRowKey   = &kACInjectedRowKey;   // NSNumber: original row count (injected row index)
+// Style cache: copied from the first real IconActionTableViewCell so the injected
+// row matches Apollo's theme (custom themes differ from UIColor.label).
+static const void *kACStyleFontKey     = &kACStyleFontKey;     // UIFont for actionTitleLabel
+static const void *kACStyleColorKey    = &kACStyleColorKey;    // UIColor for actionTitleLabel.textColor
+static const void *kACStyleIconTintKey = &kACStyleIconTintKey; // UIColor for iconImageView.tintColor
 
 // MARK: - SavedPostsCommentsViewController hooks
 
@@ -390,28 +528,65 @@ static NSString *sPendingCategoryFullName = nil;
 %end
 
 // MARK: - "Add Category" alert intercept
-// sub_100658d64 presents Apollo's "New Saved Category" UIAlertController via
-// [self.navigationController presentViewController:...], NOT via self, so the hook
-// above on SavedPostsCommentsViewController doesn't fire. Hook UIViewController
-// globally and use sSavedViewActive to gate it to just the saved posts context.
+// Apollo presents a "New Saved Category" UIAlertController in two contexts:
+//   1. From the saved view's ActionController → "Add Category" row (sub_100658d64).
+//   2. From the "Saved!" toast long-press context menu → "Add Saved Category" action
+//      (sub_10051d69c), which fires anywhere in the app, not just the saved view.
+// Both present via [navigationController presentViewController:...] rather than via
+// self, so the SavedPostsCommentsViewController hook above doesn't catch them.
+// Hook UIViewController globally without the sSavedViewActive gate so both paths
+// get the custom AddCategoryViewController sheet instead of the stock alert.
 
 %hook UIViewController
 
 - (void)presentViewController:(UIViewController *)vc animated:(BOOL)animated completion:(void (^)(void))completion {
-    if (sSavedViewActive &&
-        [vc isKindOfClass:[UIAlertController class]] &&
+    // Tag the 3-dot ActionController with the fullName so its UITableView hooks can inject
+    // a "Change Category" row. Must be done before %orig so the AC is tagged at presentation time.
+    if (sSavedViewActive && sPendingACFullName &&
+        [vc isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) {
+        objc_setAssociatedObject(vc, kACFullNameKey, sPendingACFullName, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        sPendingACFullName = nil;
+    }
+
+    if ([vc isKindOfClass:[UIAlertController class]] &&
         [[(UIAlertController *)vc title] isEqualToString:@"New Saved Category"]) {
         // Dismiss the ActionController (currently presented on self), then show
         // AddCategoryViewController so the two presentations don't overlap.
         UIViewController *presentedAC = self.presentedViewController;
+
+        // Toast path: no AC is presented — the alert came from the long-press context
+        // menu on the "Saved!" toast. Walk the window hierarchy to find the
+        // HollaSavedItemStatusView so we can auto-assign after creation, matching
+        // Apollo's native "Saved to new category!" behaviour (sub_10051d814).
+        NSString *toastFullName = nil;
+        if (!presentedAC) {
+            Class hollaClass = objc_getClass("_TtC6Apollo24HollaSavedItemStatusView");
+            if (hollaClass) {
+                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+                    for (UIWindow *window in [(UIWindowScene *)scene windows]) {
+                        toastFullName = findHollaFullName(window, hollaClass);
+                        if (toastFullName) break;
+                    }
+                    if (toastFullName) break;
+                }
+            }
+            ApolloLog(@"[SavedCategories] toast Add Category fullName: %@", toastFullName ?: @"(not found)");
+        }
+
         __weak UIViewController *weakSelf = self;
+        NSString *capturedToastFullName = toastFullName;
         void (^showAddVC)(void) = ^{
             UIViewController *strongSelf = weakSelf;
             if (!strongSelf) return;
             AddCategoryViewController *addVC = [[AddCategoryViewController alloc] init];
             addVC.existingCategoryNames = readSortedCategoryNames();
             addVC.completionHandler = ^(NSString *name, NSString *iconName) {
-                createSavedCategory(name, iconName);
+                BOOL assigns = capturedToastFullName.length > 0;
+                createSavedCategory(name, iconName, assigns);
+                if (assigns) {
+                    changeSavedItemCategory(capturedToastFullName, name);
+                }
             };
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:addVC];
             [strongSelf presentViewController:nav animated:YES completion:nil];
@@ -428,16 +603,95 @@ static NSString *sPendingCategoryFullName = nil;
 
 %end
 
-// MARK: - ActionController icon injection
+// MARK: - ActionController icon injection + Change Category row injection
 // Apollo's native saved-categories ActionController uses IconActionTableViewCell,
 // which sets its iconImageView from a fixed per-action-type image. We post-process
 // each cell after %orig to replace that image with the user's custom SF Symbol.
 // We gate on sSavedViewActive so we only touch the saved categories AC, not others.
+//
+// For the 3-dot menu ActionController in the saved view, we inject an extra
+// "Change Category" row by:
+//   1. Adding +1 to numberOfRowsInSection when the AC is tagged with a fullName.
+//   2. Returning a custom cell for that last row (without calling %orig, which would
+//      attempt an out-of-bounds Swift array access).
+//   3. Blocking heightForRowAtIndexPath %orig for the same reason.
+//   4. On selection, dismissing the AC and presenting a UIAlertController picker.
 
 %hook _TtC6Apollo16ActionController
 
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    NSInteger count = %orig;
+    if (objc_getAssociatedObject(self, kACFullNameKey)) {
+        // Register IconActionTableViewCell under our own identifier so we can dequeue
+        // a native Apollo-styled cell for the injected row.
+        [tableView registerClass:objc_getClass("_TtC6Apollo23IconActionTableViewCell")
+          forCellReuseIdentifier:@"ApolloFixChangeCategoryCell"];
+        // Store the injected row index (= original count) so cell/height/select hooks
+        // can identify it without recalculating.
+        objc_setAssociatedObject(self, kACInjectedRowKey, @(count), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return count + 1;
+    }
+    return count;
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // Intercept the injected row BEFORE %orig to avoid an out-of-bounds Swift array access.
+    NSNumber *injectedRow = objc_getAssociatedObject(self, kACInjectedRowKey);
+    if (injectedRow && indexPath.row == injectedRow.integerValue) {
+        // Dequeue a native IconActionTableViewCell and configure it exactly as Apollo does
+        // for icon-backed rows, so it matches the visual style of the other menu items.
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ApolloFixChangeCategoryCell"
+                                                                forIndexPath:indexPath];
+
+        Ivar titleIvar = class_getInstanceVariable(object_getClass(cell), "actionTitleLabel");
+        if (titleIvar) {
+            UILabel *label = object_getIvar(cell, titleIvar);
+            label.text = @"Change Category";
+            // Apply cached font/color from a real Apollo row so the theme matches.
+            UIFont *font = objc_getAssociatedObject(self, kACStyleFontKey);
+            UIColor *color = objc_getAssociatedObject(self, kACStyleColorKey);
+            if (font) label.font = font;
+            if (color) label.textColor = color;
+        }
+
+        Ivar iconIvar = class_getInstanceVariable(object_getClass(cell), "iconImageView");
+        if (iconIvar) {
+            UIImageView *imageView = object_getIvar(cell, iconIvar);
+            // Use Apollo's own saved-category asset so the size matches other icons
+            // (Apollo stores these as app-bundle images, not SF Symbols).
+            imageView.image = [UIImage imageNamed:@"option-saved-category"];
+            UIColor *tint = objc_getAssociatedObject(self, kACStyleIconTintKey);
+            if (tint) imageView.tintColor = tint;
+        }
+
+        Ivar enabledIvar = class_getInstanceVariable(object_getClass(cell), "actionsEnabled");
+        if (enabledIvar) {
+            *(BOOL *)((uint8_t *)(__bridge void *)cell + ivar_getOffset(enabledIvar)) = YES;
+        }
+        [cell setUserInteractionEnabled:YES];
+        return cell;
+    }
+
     UITableViewCell *cell = %orig;
+
+    // Cache font/color/tintColor from the first real IconActionTableViewCell so the
+    // injected row can match the current Apollo theme exactly.
+    if (injectedRow && !objc_getAssociatedObject(self, kACStyleFontKey) &&
+        [cell isKindOfClass:objc_getClass("_TtC6Apollo23IconActionTableViewCell")]) {
+        Ivar lIvar = class_getInstanceVariable(object_getClass(cell), "actionTitleLabel");
+        if (lIvar) {
+            UILabel *lbl = object_getIvar(cell, lIvar);
+            if (lbl.font)      objc_setAssociatedObject(self, kACStyleFontKey,  lbl.font,      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (lbl.textColor) objc_setAssociatedObject(self, kACStyleColorKey, lbl.textColor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        Ivar ivIvar = class_getInstanceVariable(object_getClass(cell), "iconImageView");
+        if (ivIvar) {
+            UIImageView *iv = object_getIvar(cell, ivIvar);
+            UIColor *tc = iv.tintColor;
+            if (tc) objc_setAssociatedObject(self, kACStyleIconTintKey, tc, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+
     if (!sSavedViewActive) return cell;
 
     // Only category rows use IconActionTableViewCell.
@@ -462,6 +716,53 @@ static NSString *sPendingCategoryFullName = nil;
     [imageView setImage:icon];
 
     return cell;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // Block %orig for the injected row — it would attempt an out-of-bounds Swift array access.
+    // Instead, delegate to row 0 so the height matches real rows exactly.
+    NSNumber *injectedRow = objc_getAssociatedObject(self, kACInjectedRowKey);
+    if (injectedRow && indexPath.row == injectedRow.integerValue) {
+        NSIndexPath *refPath = [NSIndexPath indexPathForRow:0 inSection:0];
+        return %orig(tableView, refPath);
+    }
+    return %orig;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSNumber *injectedRow = objc_getAssociatedObject(self, kACInjectedRowKey);
+    if (injectedRow && indexPath.row == injectedRow.integerValue) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        NSString *fullName = objc_getAssociatedObject(self, kACFullNameKey);
+        if (!fullName.length) return;
+
+        NSArray<NSString *> *categories = readSortedCategoryNames();
+        NSString *currentCat = currentCategoryForFullName(fullName);
+        UIViewController *selfVC = (UIViewController *)self;
+        UIViewController *presentingVC = selfVC.presentingViewController;
+        [selfVC dismissViewControllerAnimated:YES completion:^{
+            if (!presentingVC) return;
+
+            ApolloFixCategoryPickerVC *picker = [[ApolloFixCategoryPickerVC alloc]
+                initWithStyle:UITableViewStyleInsetGrouped];
+            picker.fullName = fullName;
+            picker.categories = categories;
+            picker.currentCategory = currentCat;
+            picker.modalPresentationStyle = UIModalPresentationPageSheet;
+            if (@available(iOS 15.0, *)) {
+                UISheetPresentationController *sheet = picker.sheetPresentationController;
+                sheet.detents = @[
+                    [UISheetPresentationControllerDetent mediumDetent],
+                    [UISheetPresentationControllerDetent largeDetent],
+                ];
+                sheet.prefersGrabberVisible = YES;
+                sheet.prefersScrollingExpandsWhenScrolledToEdge = YES;
+            }
+            [presentingVC presentViewController:picker animated:YES completion:nil];
+        }];
+        return;
+    }
+    %orig;
 }
 
 %end
@@ -624,6 +925,36 @@ static BOOL sSortNextContextMenu = NO;
                     [catActions addObject:catAction];
                 }
 
+                // "Add Category" — creates a new category and assigns the item to it.
+                NSString *capturedFullNameForAdd = changeCategoryFullName;
+                UIAction *addCatAction = [UIAction
+                    actionWithTitle:@"Add Category"
+                    image:[UIImage systemImageNamed:@"plus"]
+                    identifier:nil
+                    handler:^(__kindof UIAction *a) {
+                        UIWindow *keyWindow = nil;
+                        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                                keyWindow = [(UIWindowScene *)scene keyWindow];
+                                if (keyWindow) break;
+                            }
+                        }
+                        UIViewController *topVC = keyWindow.rootViewController;
+                        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+                        if (!topVC) return;
+                        AddCategoryViewController *addVC = [[AddCategoryViewController alloc] init];
+                        addVC.existingCategoryNames = readSortedCategoryNames();
+                        addVC.completionHandler = ^(NSString *name, NSString *iconName) {
+                            createSavedCategory(name, iconName, YES);
+                            // Assign the item to the newly created category, matching
+                            // Apollo's original "New Saved Category" alert handler behavior.
+                            changeSavedItemCategory(capturedFullNameForAdd, name);
+                        };
+                        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:addVC];
+                        [topVC presentViewController:nav animated:YES completion:nil];
+                    }];
+                [catActions addObject:addCatAction];
+
                 UIMenu *changeCatMenu = [UIMenu
                     menuWithTitle:@"Change Category"
                     image:[UIImage systemImageNamed:@"folder"]
@@ -784,7 +1115,7 @@ static void unregisterCategoryObserver(id node) {
     objc_setAssociatedObject(node, kCategoryObserverKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-// MARK: - LargePostCellNode badge
+// MARK: - LargePostCellNode badge + 3-dot menu
 
 %hook _TtC6Apollo17LargePostCellNode
 
@@ -801,9 +1132,23 @@ static void unregisterCategoryObserver(id node) {
     unregisterCategoryObserver(self);
 }
 
+// Capture the post's fullName before the 3-dot ActionController is presented.
+- (void)moreOptionsButtonTappedWithSender:(id)sender {
+    if (sSavedViewActive) {
+        Ivar linkIvar = class_getInstanceVariable(object_getClass(self), "link");
+        if (linkIvar) {
+            RDKThing *link = object_getIvar(self, linkIvar);
+            NSString *fn = [link fullName];
+            if (fn.length > 0) sPendingACFullName = fn;
+        }
+    }
+    %orig;
+    sPendingACFullName = nil;
+}
+
 %end
 
-// MARK: - CompactPostCellNode badge
+// MARK: - CompactPostCellNode badge + 3-dot menu
 
 %hook _TtC6Apollo19CompactPostCellNode
 
@@ -820,9 +1165,23 @@ static void unregisterCategoryObserver(id node) {
     unregisterCategoryObserver(self);
 }
 
+// Capture the post's fullName before the 3-dot ActionController is presented.
+- (void)moreOptionsButtonTappedWithSender:(id)sender {
+    if (sSavedViewActive) {
+        Ivar linkIvar = class_getInstanceVariable(object_getClass(self), "link");
+        if (linkIvar) {
+            RDKThing *link = object_getIvar(self, linkIvar);
+            NSString *fn = [link fullName];
+            if (fn.length > 0) sPendingACFullName = fn;
+        }
+    }
+    %orig;
+    sPendingACFullName = nil;
+}
+
 %end
 
-// MARK: - CommentCellNode badge
+// MARK: - CommentCellNode badge + 3-dot menu
 
 %hook _TtC6Apollo15CommentCellNode
 
@@ -837,6 +1196,20 @@ static void unregisterCategoryObserver(id node) {
     %orig;
     hideCategoryBadge([(ASCellNode *)(id)self view]);
     unregisterCategoryObserver(self);
+}
+
+// Capture the comment's fullName before the 3-dot ActionController is presented.
+- (void)moreOptionsTappedWithSender:(id)sender {
+    if (sSavedViewActive) {
+        Ivar commentIvar = class_getInstanceVariable(object_getClass(self), "comment");
+        if (commentIvar) {
+            RDKThing *comment = object_getIvar(self, commentIvar);
+            NSString *fn = [comment fullName];
+            if (fn.length > 0) sPendingACFullName = fn;
+        }
+    }
+    %orig;
+    sPendingACFullName = nil;
 }
 
 %end
