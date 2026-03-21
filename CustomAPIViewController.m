@@ -230,9 +230,9 @@ static NSString *sServerReturnedBundleId = nil;
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case SectionBackupRestore: return 2;
-        case SectionAPIKeys: return 5; // 4 text fields + Instructions
+        case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
         case SectionNotifications: return 2;
-        case SectionGeneral: return 6;
+        case SectionGeneral: return 7;
         case SectionMedia: return 2;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
@@ -474,6 +474,15 @@ static NSString *sServerReturnedBundleId = nil;
                                                        text:sUserAgent
                                                         tag:TagUserAgent];
         case 4: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Troubleshooting"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Troubleshooting"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            }
+            cell.textLabel.text = @"Can't sign in?";
+            return cell;
+        }
+        case 5: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Instructions"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Instructions"];
@@ -808,6 +817,11 @@ static NSString *sServerReturnedBundleId = nil;
                                             label:@"Save Category Badges"
                                                on:[defaults boolForKey:UDKeyShowSavedCategoryBadge]
                                            action:@selector(showSavedCategoryBadgeSwitchToggled:)];
+        case 6:
+            return [self switchCellWithIdentifier:@"Cell_Gen_CollapsePinned"
+                                            label:@"Collapse Pinned Comments"
+                                               on:[defaults boolForKey:UDKeyCollapsePinnedComments]
+                                           action:@selector(collapsePinnedCommentsSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1052,6 +1066,8 @@ static NSString *sServerReturnedBundleId = nil;
         }
     } else if (indexPath.section == SectionAPIKeys) {
         if (indexPath.row == 4) {
+            [self pushTroubleshootingViewController];
+        } else if (indexPath.row == 5) {
             [self pushInstructionsViewController];
         }
     } else if (indexPath.section == SectionAbout) {
@@ -1084,7 +1100,7 @@ static NSString *sServerReturnedBundleId = nil;
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == SectionBackupRestore) return YES;
-    if (indexPath.section == SectionAPIKeys && indexPath.row == 4) return YES;
+    if (indexPath.section == SectionAPIKeys && (indexPath.row == 4 || indexPath.row == 5)) return YES;
     if (indexPath.section == SectionMedia && (indexPath.row == 0 || indexPath.row == 1)) return YES;
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1)) return YES;
     if (indexPath.section == SectionCredits) return YES;
@@ -1126,6 +1142,67 @@ static NSString *sServerReturnedBundleId = nil;
             });
         });
     }];
+}
+
+#pragma mark - Troubleshooting VC
+
+- (void)pushTroubleshootingViewController {
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.title = @"Can't sign in?";
+    vc.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    UITextView *textView = [[UITextView alloc] init];
+    textView.editable = NO;
+    textView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    if (@available(iOS 15.0, *)) {
+        NSString *troubleshootingText =
+            @"**If you're having trouble signing in, try the following:**\n\n"
+            @"**1. Accept cookies first**\n"
+            @"Tap the X in the upper-right corner of the sign-in page to return to Reddit homepage. Accept the cookies prompt, then tap back to return to the sign-in page and refresh.\n\n"
+            @"**2. Rotate to landscape**\n"
+            @"If the email/password fields aren't responding, rotate your device to landscape. The cookies banner may appear in the bottom-right. Accept it, then try inputting your credentials again.\n\n"
+            @"**3. Request Desktop Website**\n"
+            @"While on the sign-in page, tap the page settings icon in the upper-right of the toolbar and tap \"Request Desktop Website\". This can fix issues where sign-in appears to succeed but the account never appears.\n\n"
+            @"**4. Clear reddit.com cookies in Safari**\n"
+            @"Go to Settings → Apps → Safari → Advanced → Website Data, search for \"reddit\", and delete the cookies. Then try signing in again.";
+
+        NSAttributedStringMarkdownParsingOptions *markdownOptions = [[NSAttributedStringMarkdownParsingOptions alloc] init];
+        markdownOptions.interpretedSyntax = NSAttributedStringMarkdownInterpretedSyntaxInlineOnly;
+        textView.attributedText = [[NSAttributedString alloc] initWithMarkdownString:troubleshootingText options:markdownOptions baseURL:nil error:nil];
+
+        NSMutableAttributedString *attributedText = [textView.attributedText mutableCopy];
+        [attributedText enumerateAttribute:NSFontAttributeName inRange:NSMakeRange(0, attributedText.length) options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
+            UIFont *oldFont = (UIFont *)value;
+            UIFont *newFont = oldFont ? [oldFont fontWithSize:15] : [UIFont systemFontOfSize:15];
+            [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
+        }];
+        textView.attributedText = attributedText;
+    } else {
+        textView.font = [UIFont systemFontOfSize:15];
+        textView.text =
+            @"If you're having trouble signing in, try the following:\n\n"
+            @"1. Accept cookies first\n"
+            @"Tap the X in the upper-right corner of the sign-in page to return to Reddit homepage. Accept the cookies prompt, then tap back to return to the sign-in page and refresh.\n\n"
+            @"2. Rotate to landscape\n"
+            @"If the email/password fields aren't responding, rotate your device to landscape. The cookies banner may appear in the bottom-right. Accept it, then try inputting your credentials again.\n\n"
+            @"3. Request Desktop Website\n"
+            @"While on the sign-in page, tap the page settings icon in the upper-right of the toolbar and tap \"Request Desktop Website\". This can fix issues where sign-in appears to succeed but the account never appears.\n\n"
+            @"4. Clear reddit.com cookies in Safari\n"
+            @"Go to Settings → Apps → Safari → Advanced → Website Data, search for \"reddit\", and delete the cookies. Then try signing in again.";
+    }
+    textView.textColor = UIColor.labelColor;
+    textView.textContainerInset = UIEdgeInsetsMake(16, 16, 16, 16);
+
+    [vc.view addSubview:textView];
+    [NSLayoutConstraint activateConstraints:@[
+        [textView.topAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.topAnchor],
+        [textView.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor],
+        [textView.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor],
+        [textView.bottomAnchor constraintEqualToAnchor:vc.view.bottomAnchor],
+    ]];
+
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 #pragma mark - Instructions VC
@@ -1290,6 +1367,10 @@ static NSString *sServerReturnedBundleId = nil;
 
 - (void)showSavedCategoryBadgeSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowSavedCategoryBadge];
+}
+
+- (void)collapsePinnedCommentsSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCollapsePinnedComments];
 }
 
 #pragma mark - Backup / Restore

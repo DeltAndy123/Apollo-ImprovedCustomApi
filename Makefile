@@ -19,7 +19,7 @@ ApolloImprovedCustomApi_FILES = \
     ApolloState.m \
     ApolloShareLinks.xm \
     ApolloMedia.xm \
-    ApolloCommentsClipping.xm \
+    ApolloCommentsCollapse.xm \
     ApolloLiquidGlass.xm \
     ApolloSettings.xm \
     ApolloRecentlyRead.xm \

@@ -18,3 +18,4 @@ static NSString *const UDKeyOpenLinksInSteamApp = @"OpenLinksInSteamApp";
 static NSString *const UDKeyShowSavedCategoryBadge = @"ShowSavedCategoryBadge";
 static NSString *const UDKeyPushNotificationServer = @"PushNotificationServer";
 static NSString *const UDKeyServerToken = @"ServerSecretToken";
+static NSString *const UDKeyCollapsePinnedComments = @"CollapsePinnedComments";
