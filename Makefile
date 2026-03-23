@@ -26,6 +26,8 @@ ApolloImprovedCustomApi_FILES = \
     ApolloSavedCategories.xm \
     ApolloVideoUnmute.xm \
     ApolloVideoSwipeFix.xm \
+    ApolloTweetBuddy.xm \
+    ApolloWeather.xm \
     CustomAPIViewController.m \
     SavedCategoriesViewController.m \
     Defaults.m \
