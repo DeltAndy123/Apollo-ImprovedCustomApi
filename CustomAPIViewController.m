@@ -232,8 +232,8 @@ static NSString *sServerReturnedBundleId = nil;
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
         case SectionNotifications: return 2;
-        case SectionGeneral: return 7;
-        case SectionMedia: return 2;
+        case SectionGeneral: return 8;
+        case SectionMedia: return 3;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
         case SectionCredits: return 3;
@@ -794,11 +794,16 @@ static NSString *sServerReturnedBundleId = nil;
                                                on:[defaults boolForKey:UDKeyEnableFLEX]
                                            action:@selector(flexSwitchToggled:)];
         case 2:
+            return [self switchCellWithIdentifier:@"Cell_Gen_CollapsePinned"
+                                            label:@"Collapse Pinned Comments"
+                                               on:[defaults boolForKey:UDKeyCollapsePinnedComments]
+                                           action:@selector(collapsePinnedCommentsSwitchToggled:)];
+        case 3:
             return [self switchCellWithIdentifier:@"Cell_Gen_RRThumbs"
                                             label:@"Recently Read Thumbnails"
                                                on:[defaults boolForKey:UDKeyShowRecentlyReadThumbnails]
                                            action:@selector(showRecentlyReadThumbnailsSwitchToggled:)];
-        case 3: {
+        case 4: {
             NSString *readPostMaxStr = sReadPostMaxCount > 0 ? [NSString stringWithFormat:@"%ld", (long)sReadPostMaxCount] : @"";
             return [self textFieldCellWithIdentifier:@"Cell_Gen_ReadMax"
                                                label:@"Recently Read Posts Limit"
@@ -807,21 +812,21 @@ static NSString *sServerReturnedBundleId = nil;
                                                  tag:TagReadPostMaxCount
                                            numerical:YES];
         }
-        case 4:
+        case 5:
+            return [self switchCellWithIdentifier:@"Cell_Gen_FilterNSFWRR"
+                                            label:@"Hide NSFW in Recently Read"
+                                               on:[defaults boolForKey:UDKeyFilterNSFWRecentlyRead]
+                                           action:@selector(filterNSFWRecentlyReadSwitchToggled:)];
+        case 6:
             return [self switchCellWithIdentifier:@"Cell_Gen_SteamApp"
                                             label:@"Open Steam Links in App"
                                                on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
                                            action:@selector(steamAppSwitchToggled:)];
-        case 5:
+        case 7:
             return [self switchCellWithIdentifier:@"Cell_Gen_SavedCategoryBadge"
                                             label:@"Save Category Badges"
                                                on:[defaults boolForKey:UDKeyShowSavedCategoryBadge]
                                            action:@selector(showSavedCategoryBadgeSwitchToggled:)];
-        case 6:
-            return [self switchCellWithIdentifier:@"Cell_Gen_CollapsePinned"
-                                            label:@"Collapse Pinned Comments"
-                                               on:[defaults boolForKey:UDKeyCollapsePinnedComments]
-                                           action:@selector(collapsePinnedCommentsSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -852,6 +857,11 @@ static NSString *sServerReturnedBundleId = nil;
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
+        case 2:
+            return [self switchCellWithIdentifier:@"Cell_Media_ProxyImgur"
+                                            label:@"Proxy Imgur via DuckDuckGo"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG]
+                                           action:@selector(proxyImgurDDGSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1010,6 +1020,10 @@ static NSString *sServerReturnedBundleId = nil;
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")"
             attributes:plainAttrs]];
+    } else if (section == SectionMedia) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Proxying routes Imgur image requests through DuckDuckGo to bypass regional blocks. Albums and uploads are unsupported."
+            attributes:plainAttrs];
     } else {
         return nil;
     }
@@ -1371,6 +1385,15 @@ static NSString *sServerReturnedBundleId = nil;
 
 - (void)collapsePinnedCommentsSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCollapsePinnedComments];
+}
+
+- (void)filterNSFWRecentlyReadSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyFilterNSFWRecentlyRead];
+}
+
+- (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
+    sProxyImgurDDG = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sProxyImgurDDG forKey:UDKeyProxyImgurDDG];
 }
 
 #pragma mark - Backup / Restore

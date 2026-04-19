@@ -19,3 +19,5 @@ static NSString *const UDKeyShowSavedCategoryBadge = @"ShowSavedCategoryBadge";
 static NSString *const UDKeyPushNotificationServer = @"PushNotificationServer";
 static NSString *const UDKeyServerToken = @"ServerSecretToken";
 static NSString *const UDKeyCollapsePinnedComments = @"CollapsePinnedComments";
+static NSString *const UDKeyFilterNSFWRecentlyRead = @"FilterNSFWRecentlyRead";
+static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";

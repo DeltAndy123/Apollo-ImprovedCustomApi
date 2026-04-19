@@ -18,5 +18,7 @@ extern NSInteger sReadPostMaxCount;
 // 0 = Default (off), 1 = Remember from Full Screen, 2 = Always
 extern NSInteger sUnmuteCommentsVideos;
 
+extern BOOL sProxyImgurDDG;
+
 extern NSString *sPushNotificationServer;
 extern NSString *sServerToken;
