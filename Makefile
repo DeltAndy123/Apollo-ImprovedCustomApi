@@ -27,14 +27,16 @@ ApolloImprovedCustomApi_FILES = \
     ApolloVideoUnmute.xm \
     ApolloVideoSwipeFix.xm \
     ApolloTweetBuddy.xm \
+    ApolloNativeTranslate.xm \
     ApolloWeather.xm \
     CustomAPIViewController.m \
+    NativeTranslationPresenter.swift \
     SavedCategoriesViewController.m \
     Defaults.m \
     UIWindow+Apollo.m \
     fishhook.c \
     $(SSZIPARCHIVE_FILES)
-ApolloImprovedCustomApi_FRAMEWORKS = UIKit Security AVFoundation OSLog StoreKit
+ApolloImprovedCustomApi_FRAMEWORKS = UIKit Security AVFoundation OSLog StoreKit SwiftUI Translation
 ApolloImprovedCustomApi_LIBRARIES = z iconv
 ApolloImprovedCustomApi_CFLAGS = -fobjc-arc -Wno-unguarded-availability-new -Wno-module-import-in-extern-c -IZipArchive/SSZipArchive -IZipArchive/SSZipArchive/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 

@@ -17,11 +17,18 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionSubreddits,
     SectionCredits,
     SectionAbout,
+    SectionDebug,
     SectionCount
 };
 
 @interface PaddedLabel : UILabel
 @end
+
+@interface NativeTranslationPresenter : NSObject
++ (BOOL)canPresentNativeTranslation;
++ (void)presentFromViewController:(UIViewController *)viewController text:(NSString *)text sourceView:(UIView *)sourceView;
+@end
+
 @implementation PaddedLabel
 static const UIEdgeInsets kPaddedLabelInsets = {2, 6, 2, 6};
 - (void)drawTextInRect:(CGRect)rect {
@@ -49,6 +56,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     TagReadPostMaxCount,
     TagPushNotificationServer,
     TagServerToken,
+    TagDebugTranslationText,
 };
 
 typedef NS_ENUM(NSInteger, BundleIdCheckState) {
@@ -62,8 +70,17 @@ typedef NS_ENUM(NSInteger, BundleIdCheckState) {
 static const NSInteger kBundleIdStatusLabelTag = 9030;
 static BundleIdCheckState sBundleIdCheckState = BundleIdCheckStateNone;
 static NSString *sServerReturnedBundleId = nil;
+static BOOL sDebugSectionVisible = NO;
+static NSString *sDebugTranslationText = @"Bonjour! This is a translation debug proof of concept inside Apollo.";
 
 #pragma mark - Helpers
+
+- (NSInteger)resolvedSectionForVisibleSection:(NSInteger)section {
+    if (!sDebugSectionVisible && section >= SectionDebug) {
+        return section + 1;
+    }
+    return section;
+}
 
 - (NSArray<NSString *> *)registeredURLSchemes {
     NSArray *urlTypes = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleURLTypes"];
@@ -224,11 +241,11 @@ static NSString *sServerReturnedBundleId = nil;
 #pragma mark - UITableViewDataSource
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return SectionCount;
+    return SectionCount - (sDebugSectionVisible ? 0 : 1);
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    switch (section) {
+    switch ([self resolvedSectionForVisibleSection:section]) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
         case SectionNotifications: return 2;
@@ -236,13 +253,14 @@ static NSString *sServerReturnedBundleId = nil;
         case SectionMedia: return 3;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
+        case SectionDebug: return 2;
         case SectionCredits: return 3;
         default: return 0;
     }
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    switch (section) {
+    switch ([self resolvedSectionForVisibleSection:section]) {
         case SectionBackupRestore: return @"Backup / Restore";
         case SectionAPIKeys: return @"API Keys";
         case SectionNotifications: return @"Push Notifications";
@@ -250,13 +268,15 @@ static NSString *sServerReturnedBundleId = nil;
         case SectionMedia: return @"Media";
         case SectionSubreddits: return @"Subreddits";
         case SectionAbout: return @"About";
+        case SectionDebug: return @"Debug";
         case SectionCredits: return @"Credits";
         default: return nil;
     }
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    switch (indexPath.section) {
+    NSInteger section = [self resolvedSectionForVisibleSection:indexPath.section];
+    switch (section) {
         case SectionBackupRestore: return [self backupRestoreCellForRow:indexPath.row tableView:tableView];
         case SectionAPIKeys: return [self apiKeyCellForRow:indexPath.row tableView:tableView];
         case SectionNotifications: return [self notificationCellForRow:indexPath.row tableView:tableView];
@@ -264,6 +284,7 @@ static NSString *sServerReturnedBundleId = nil;
         case SectionMedia: return [self mediaCellForRow:indexPath.row tableView:tableView];
         case SectionSubreddits: return [self subredditCellForRow:indexPath.row tableView:tableView];
         case SectionAbout: return [self aboutCellForRow:indexPath.row tableView:tableView];
+        case SectionDebug: return [self debugCellForRow:indexPath.row tableView:tableView];
         case SectionCredits: return [self creditsCellForRow:indexPath.row tableView:tableView];
         default: return [[UITableViewCell alloc] init];
     }
@@ -938,12 +959,41 @@ static NSString *sServerReturnedBundleId = nil;
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_About_Version"];
                 cell.selectionStyle = UITableViewCellSelectionStyleNone;
+                UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(versionRowLongPressed:)];
+                [cell addGestureRecognizer:longPress];
             }
             cell.textLabel.text = @"Version";
             cell.detailTextLabel.text = @TWEAK_VERSION;
             return cell;
         }
         default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)debugCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0:
+            return [self stackedTextFieldCellWithIdentifier:@"Cell_Debug_Translation_Text"
+                                                      label:@"Translation Text"
+                                                placeholder:@"Enter text to translate"
+                                                       text:sDebugTranslationText
+                                                        tag:TagDebugTranslationText
+                                                     detail:@"Uses Apple's native Translation UI when available on iOS 17.4 or later."];
+        case 1: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Debug_Translation_Action"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_Debug_Translation_Action"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            }
+            cell.textLabel.text = @"Show Native Translation";
+            cell.detailTextLabel.text = @"Presents the built-in translation sheet for the text above.";
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.textLabel.textColor = self.view.tintColor;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+        default:
+            return [[UITableViewCell alloc] init];
     }
 }
 
@@ -985,6 +1035,7 @@ static NSString *sServerReturnedBundleId = nil;
 #pragma mark - Footer View (sections with tappable links)
 
 - (NSAttributedString *)footerAttributedTextForSection:(NSInteger)section {
+    section = [self resolvedSectionForVisibleSection:section];
     NSDictionary *plainAttrs = @{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]};
     NSMutableAttributedString *text;
 
@@ -1023,6 +1074,10 @@ static NSString *sServerReturnedBundleId = nil;
     } else if (section == SectionMedia) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Proxying routes Imgur image requests through DuckDuckGo to bypass regional blocks. Albums and uploads are unsupported."
+            attributes:plainAttrs];
+    } else if (section == SectionDebug) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Hidden debug tools. Long-press the Version row to reveal this section again after reopening the page. The Translation framework only works on iOS 17.4+ and doesn't translate in the iOS simulator."
             attributes:plainAttrs];
     } else {
         return nil;
@@ -1071,33 +1126,40 @@ static NSString *sServerReturnedBundleId = nil;
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSInteger section = [self resolvedSectionForVisibleSection:indexPath.section];
 
-    if (indexPath.section == SectionBackupRestore) {
+    if (section == SectionBackupRestore) {
         if (indexPath.row == 0) {
             [self backupSettings];
         } else {
             [self restoreSettings];
         }
-    } else if (indexPath.section == SectionAPIKeys) {
+    } else if (section == SectionAPIKeys) {
         if (indexPath.row == 4) {
             [self pushTroubleshootingViewController];
         } else if (indexPath.row == 5) {
             [self pushInstructionsViewController];
         }
-    } else if (indexPath.section == SectionAbout) {
+    } else if (section == SectionAbout) {
         if (indexPath.row == 0) {
             [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi"] options:@{} completionHandler:nil];
         } else if (indexPath.row == 1) {
             [self exportLogs];
         }
-    } else if (indexPath.section == SectionMedia) {
+    } else if (section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (indexPath.row == 0) {
             [self presentPreferredGIFFallbackFormatSheetFromSourceView:cell];
         } else if (indexPath.row == 1) {
             [self presentUnmuteCommentsVideosModeSheetFromSourceView:cell];
         }
-    } else if (indexPath.section == SectionCredits) {
+    } else if (section == SectionDebug) {
+        if (indexPath.row == 1) {
+            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+            [tableView endEditing:YES];
+            [self presentNativeTranslationDebugFromSourceView:cell];
+        }
+    } else if (section == SectionCredits) {
         switch (indexPath.row) {
             case 0:
                 [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/EthanArbuckle/Apollo-CustomApiCredentials"] options:@{} completionHandler:nil];
@@ -1113,12 +1175,55 @@ static NSString *sServerReturnedBundleId = nil;
 }
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == SectionBackupRestore) return YES;
-    if (indexPath.section == SectionAPIKeys && (indexPath.row == 4 || indexPath.row == 5)) return YES;
-    if (indexPath.section == SectionMedia && (indexPath.row == 0 || indexPath.row == 1)) return YES;
-    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1)) return YES;
-    if (indexPath.section == SectionCredits) return YES;
+    NSInteger section = [self resolvedSectionForVisibleSection:indexPath.section];
+    if (section == SectionBackupRestore) return YES;
+    if (section == SectionAPIKeys && (indexPath.row == 4 || indexPath.row == 5)) return YES;
+    if (section == SectionMedia && (indexPath.row == 0 || indexPath.row == 1)) return YES;
+    if (section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1)) return YES;
+    if (section == SectionDebug && indexPath.row == 1) return YES;
+    if (section == SectionCredits) return YES;
     return NO;
+}
+
+- (void)versionRowLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan || sDebugSectionVisible) {
+        return;
+    }
+
+    sDebugSectionVisible = YES;
+
+    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [feedback impactOccurred];
+
+    [self.tableView beginUpdates];
+    [self.tableView insertSections:[NSIndexSet indexSetWithIndex:SectionDebug] withRowAnimation:UITableViewRowAnimationFade];
+    [self.tableView endUpdates];
+
+    NSIndexPath *firstDebugRow = [NSIndexPath indexPathForRow:0 inSection:SectionDebug];
+    if ([self.tableView numberOfRowsInSection:SectionDebug] > 0) {
+        [self.tableView scrollToRowAtIndexPath:firstDebugRow atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+    }
+}
+
+- (void)presentNativeTranslationDebugFromSourceView:(UIView *)sourceView {
+    NSString *text = [sDebugTranslationText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (text.length == 0) {
+        [self showAlertWithTitle:@"No Text to Translate" message:@"Enter some text in the debug field first."];
+        return;
+    }
+
+    Class presenterClass = NSClassFromString(@"NativeTranslationPresenter");
+    if (!presenterClass) {
+        [self showAlertWithTitle:@"Native Translation Unavailable" message:@"The Swift native translation presenter didn't load. Rebuild the tweak with the Swift bridge included."];
+        return;
+    }
+
+    if (![presenterClass canPresentNativeTranslation]) {
+        [self showAlertWithTitle:@"Requires iOS 17.4" message:@"Apple's native Translation framework UI is only available on iOS 17.4 and later."];
+        return;
+    }
+
+    [presenterClass presentFromViewController:self text:text sourceView:sourceView];
 }
 
 #pragma mark - Export Logs
@@ -1352,6 +1457,9 @@ static NSString *sServerReturnedBundleId = nil;
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sServerToken = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sServerToken forKey:UDKeyServerToken];
+    } else if (textField.tag == TagDebugTranslationText) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        sDebugTranslationText = textField.text;
     }
 }
 
