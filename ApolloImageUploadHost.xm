@@ -17,9 +17,11 @@ extern NSString *sUserAgent;
 
 static NSMutableDictionary<NSString *, NSString *> *sRedditUploadAssetIDByURL = nil;
 static NSMutableDictionary<NSString *, NSDictionary *> *sRedditUploadInfoByAssetID = nil;
+static NSMutableDictionary<NSString *, NSArray<NSString *> *> *sRedditUploadGalleryAssetIDsByAlbumID = nil;
 static NSMutableSet<NSString *> *sRedditResponseTransformerInstalledClasses = nil;
 static char kApolloRedditCommentResponseDataKey;
 static char kApolloRedditSubmitResponseDataKey;
+static char kApolloRedditSubmitRequestKey;
 
 static NSObject *ApolloRedditUploadAssetMapLock(void) {
     static NSObject *lock;
@@ -194,6 +196,42 @@ static NSString *ApolloFormEncodeComponent(NSString *component) {
     return [component stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"";
 }
 
+static NSString *ApolloTrimmedString(NSString *string) {
+    return [string isKindOfClass:[NSString class]] ? [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
+}
+
+static NSDictionary<NSString *, NSArray<NSString *> *> *ApolloFormValuesByKeyFromBodyString(NSString *body) {
+    if (body.length == 0) return @{};
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *values = [NSMutableDictionary dictionary];
+    for (NSString *pair in [body componentsSeparatedByString:@"&"]) {
+        NSRange equals = [pair rangeOfString:@"="];
+        NSString *key = ApolloFormDecodeComponent(equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]);
+        NSString *value = ApolloFormDecodeComponent(equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location + 1]);
+        if (key.length == 0) continue;
+        NSMutableArray *bucket = values[key];
+        if (!bucket) {
+            bucket = [NSMutableArray array];
+            values[key] = bucket;
+        }
+        [bucket addObject:value ?: @""];
+    }
+    return values;
+}
+
+static NSString *ApolloFirstFormValue(NSDictionary<NSString *, NSArray<NSString *> *> *formValues, NSString *key) {
+    NSArray *values = formValues[key];
+    NSString *value = values.lastObject;
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+static BOOL ApolloBoolFromFormValue(NSString *value, BOOL defaultValue) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0) return defaultValue;
+    NSString *lower = value.lowercaseString;
+    if ([lower isEqualToString:@"true"] || [lower isEqualToString:@"yes"] || [lower isEqualToString:@"1"]) return YES;
+    if ([lower isEqualToString:@"false"] || [lower isEqualToString:@"no"] || [lower isEqualToString:@"0"]) return NO;
+    return defaultValue;
+}
+
 static NSRegularExpression *ApolloRedditUploadedMediaURLRegex(void) {
     static NSRegularExpression *regex;
     static dispatch_once_t onceToken;
@@ -249,6 +287,233 @@ static NSString *ApolloFirstRedditUploadedMediaURLInString(NSString *text) {
     return match ? [text substringWithRange:match.range] : nil;
 }
 
+static BOOL ApolloRedditUploadInfoExistsForAssetID(NSString *assetID) {
+    if (assetID.length == 0) return NO;
+    @synchronized(ApolloRedditUploadAssetMapLock()) {
+        return [sRedditUploadInfoByAssetID[assetID] isKindOfClass:[NSDictionary class]];
+    }
+}
+
+static NSString *ApolloAssetIDForRedditUploadToken(NSString *token) {
+    NSString *trimmed = ApolloTrimmedString(token);
+    if (trimmed.length == 0) return nil;
+
+    NSString *decoded = trimmed.stringByRemovingPercentEncoding ?: trimmed;
+    if (ApolloRedditUploadInfoExistsForAssetID(decoded)) return decoded;
+
+    NSString *stagedURL = ApolloFirstRedditUploadedMediaURLInString(decoded) ?: decoded;
+    NSString *assetID = ApolloAssetIDForRedditUploadedMediaURL(stagedURL);
+    if (assetID.length > 0) return assetID;
+
+    NSURLComponents *components = [NSURLComponents componentsWithString:decoded];
+    NSString *lastPathComponent = components.path.lastPathComponent;
+    if (ApolloRedditUploadInfoExistsForAssetID(lastPathComponent)) return lastPathComponent;
+    return nil;
+}
+
+static void ApolloAppendImgurAlbumTokensFromObject(id object, NSMutableArray<NSString *> *tokens) {
+    if (!object || object == (id)[NSNull null]) return;
+    if ([object isKindOfClass:[NSString class]]) {
+        for (NSString *piece in [(NSString *)object componentsSeparatedByString:@","]) {
+            NSString *token = ApolloTrimmedString(piece);
+            if (token.length > 0) [tokens addObject:token];
+        }
+        return;
+    }
+    if ([object isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)object) ApolloAppendImgurAlbumTokensFromObject(item, tokens);
+        return;
+    }
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = object;
+        for (NSString *key in @[@"deletehash", @"deletehashes", @"id", @"ids", @"link", @"url", @"media_id"]) {
+            ApolloAppendImgurAlbumTokensFromObject(dict[key], tokens);
+        }
+    }
+}
+
+static NSArray<NSString *> *ApolloImgurAlbumTokensFromRequest(NSURLRequest *request) {
+    NSData *bodyData = request.HTTPBody;
+    if (bodyData.length == 0) return @[];
+
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    id json = [NSJSONSerialization JSONObjectWithData:bodyData options:0 error:nil];
+    if ([json isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = json;
+        for (NSString *key in @[@"deletehashes", @"ids", @"images", @"image_ids"]) {
+            ApolloAppendImgurAlbumTokensFromObject(dict[key], tokens);
+        }
+    } else if ([json isKindOfClass:[NSArray class]]) {
+        ApolloAppendImgurAlbumTokensFromObject(json, tokens);
+    }
+
+    NSString *body = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
+    NSDictionary *formValues = ApolloFormValuesByKeyFromBodyString(body);
+    for (NSString *key in @[@"deletehashes", @"ids", @"images", @"image_ids"]) {
+        ApolloAppendImgurAlbumTokensFromObject(formValues[key], tokens);
+    }
+
+    if (ApolloStringContainsRedditUploadedMedia(body)) {
+        NSRegularExpression *regex = ApolloRedditUploadedMediaURLRegex();
+        NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:body options:0 range:NSMakeRange(0, body.length)];
+        for (NSTextCheckingResult *match in matches) {
+            [tokens addObject:[body substringWithRange:match.range]];
+        }
+    }
+    return tokens;
+}
+
+static NSArray<NSString *> *ApolloRedditGalleryAssetIDsFromImgurAlbumRequest(NSURLRequest *request) {
+    NSArray<NSString *> *tokens = ApolloImgurAlbumTokensFromRequest(request);
+    NSMutableArray<NSString *> *assetIDs = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *token in tokens) {
+        NSString *assetID = ApolloAssetIDForRedditUploadToken(token);
+        if (assetID.length == 0 || [seen containsObject:assetID]) continue;
+        [assetIDs addObject:assetID];
+        [seen addObject:assetID];
+    }
+    return assetIDs;
+}
+
+static NSString *ApolloNewSyntheticImgurAlbumID(void) {
+    NSString *uuid = [[[NSUUID UUID] UUIDString] stringByReplacingOccurrencesOfString:@"-" withString:@""].lowercaseString;
+    NSString *suffix = uuid.length > 10 ? [uuid substringToIndex:10] : uuid;
+    return [@"arg" stringByAppendingString:(suffix.length > 0 ? suffix : @"gallery")];
+}
+
+static void ApolloRecordRedditGalleryAssetIDs(NSString *albumID, NSArray<NSString *> *assetIDs) {
+    if (albumID.length == 0 || assetIDs.count == 0) return;
+    @synchronized(ApolloRedditUploadAssetMapLock()) {
+        if (!sRedditUploadGalleryAssetIDsByAlbumID) sRedditUploadGalleryAssetIDsByAlbumID = [NSMutableDictionary new];
+        sRedditUploadGalleryAssetIDsByAlbumID[albumID] = [assetIDs copy];
+    }
+}
+
+static NSString *ApolloImgurAlbumIDFromURLString(NSString *urlString) {
+    NSString *decoded = ApolloTrimmedString(urlString).stringByRemovingPercentEncoding ?: ApolloTrimmedString(urlString);
+    if (decoded.length == 0) return nil;
+    NSURLComponents *components = [NSURLComponents componentsWithString:decoded];
+    NSString *host = components.host.lowercaseString;
+    NSArray<NSString *> *parts = components.path.pathComponents;
+
+    if ([host isEqualToString:@"imgur.com"] || [host isEqualToString:@"www.imgur.com"] || [host isEqualToString:@"m.imgur.com"]) {
+        for (NSUInteger i = 0; i + 1 < parts.count; i++) {
+            if ([parts[i] isEqualToString:@"a"] || [parts[i] isEqualToString:@"gallery"]) {
+                NSString *albumID = [parts[i + 1] stringByDeletingPathExtension];
+                return albumID.length > 0 && ![albumID isEqualToString:@"/"] ? albumID : nil;
+            }
+        }
+    }
+
+    if ([host isEqualToString:@"apollogur.download"] && [components.path containsString:@"album"]) {
+        NSString *last = [components.path.lastPathComponent stringByDeletingPathExtension];
+        NSRange dash = [last rangeOfString:@"-" options:NSBackwardsSearch];
+        NSString *albumID = dash.location == NSNotFound ? last : [last substringFromIndex:dash.location + 1];
+        return albumID.length > 0 ? albumID : nil;
+    }
+
+    if ([host isEqualToString:@"api.imgur.com"] || [host isEqualToString:@"imgur-apiv3.p.rapidapi.com"]) {
+        for (NSUInteger i = 0; i + 1 < parts.count; i++) {
+            if ([parts[i] isEqualToString:@"album"]) {
+                NSString *albumID = [parts[i + 1] stringByDeletingPathExtension];
+                return albumID.length > 0 && ![albumID isEqualToString:@"/"] ? albumID : nil;
+            }
+        }
+    }
+    return nil;
+}
+
+static NSArray<NSString *> *ApolloRedditGalleryAssetIDsForAlbumID(NSString *albumID) {
+    if (albumID.length == 0) return nil;
+    @synchronized(ApolloRedditUploadAssetMapLock()) {
+        NSArray *assetIDs = sRedditUploadGalleryAssetIDsByAlbumID[albumID];
+        return [assetIDs isKindOfClass:[NSArray class]] ? [assetIDs copy] : nil;
+    }
+}
+
+static NSArray<NSString *> *ApolloRedditGalleryAssetIDsForURLString(NSString *urlString, NSString **outAlbumID) {
+    NSString *albumID = ApolloImgurAlbumIDFromURLString(urlString);
+    if (outAlbumID) *outAlbumID = albumID;
+    return ApolloRedditGalleryAssetIDsForAlbumID(albumID);
+}
+
+static NSDictionary *ApolloSyntheticImgurImageDictionaryForAssetID(NSString *assetID) {
+    NSString *mimeType = @"image/jpeg";
+    @synchronized(ApolloRedditUploadAssetMapLock()) {
+        NSDictionary *info = sRedditUploadInfoByAssetID[assetID];
+        if ([info[@"mimeType"] isKindOfClass:[NSString class]]) mimeType = info[@"mimeType"];
+    }
+    NSString *link = ApolloRedditUploadFallbackURLForAssetID(assetID) ?: @"";
+    return @{
+        @"id": assetID ?: @"",
+        @"deletehash": assetID ?: @"",
+        @"title": [NSNull null],
+        @"description": [NSNull null],
+        @"datetime": @((NSInteger)[[NSDate date] timeIntervalSince1970]),
+        @"type": mimeType ?: @"image/jpeg",
+        @"animated": @NO,
+        @"width": @0,
+        @"height": @0,
+        @"size": @0,
+        @"views": @0,
+        @"bandwidth": @0,
+        @"link": link,
+    };
+}
+
+static BOOL ApolloIsImgurAlbumCreationRequest(NSURLRequest *request) {
+    if (![request isKindOfClass:[NSURLRequest class]]) return NO;
+    NSURL *url = request.URL;
+    NSString *host = url.host.lowercaseString;
+    NSString *method = request.HTTPMethod ?: @"GET";
+    BOOL imgurHost = [host isEqualToString:@"imgur-apiv3.p.rapidapi.com"] || [host isEqualToString:@"api.imgur.com"];
+    return imgurHost && [url.path hasPrefix:@"/3/album"] && [method caseInsensitiveCompare:@"POST"] == NSOrderedSame;
+}
+
+NSData *ApolloRedditSyntheticImgurAlbumResponseDataForRequest(NSURLRequest *request) {
+    if (!ApolloIsImgurAlbumCreationRequest(request)) return nil;
+    NSArray<NSString *> *assetIDs = ApolloRedditGalleryAssetIDsFromImgurAlbumRequest(request);
+    if (assetIDs.count < 2) {
+        ApolloLog(@"[RedditUpload] Imgur album request did not map to a Reddit gallery (mappedItems=%lu)", (unsigned long)assetIDs.count);
+        return nil;
+    }
+
+    NSString *albumID = ApolloNewSyntheticImgurAlbumID();
+    ApolloRecordRedditGalleryAssetIDs(albumID, assetIDs);
+    NSString *link = [@"https://imgur.com/a/" stringByAppendingString:albumID];
+
+    NSMutableArray *images = [NSMutableArray arrayWithCapacity:assetIDs.count];
+    for (NSString *assetID in assetIDs) [images addObject:ApolloSyntheticImgurImageDictionaryForAssetID(assetID)];
+
+    NSDictionary *root = @{
+        @"status": @200,
+        @"success": @YES,
+        @"data": @{
+            @"id": albumID,
+            @"deletehash": albumID,
+            @"title": [NSNull null],
+            @"description": [NSNull null],
+            @"datetime": @((NSInteger)[[NSDate date] timeIntervalSince1970]),
+            @"cover": assetIDs.firstObject ?: @"",
+            @"cover_width": @0,
+            @"cover_height": @0,
+            @"account_url": [NSNull null],
+            @"privacy": @"hidden",
+            @"layout": @"blog",
+            @"views": @0,
+            @"link": link,
+            @"favorite": @NO,
+            @"nsfw": [NSNull null],
+            @"section": [NSNull null],
+            @"images_count": @(assetIDs.count),
+            @"images": images,
+        },
+    };
+    ApolloLog(@"[RedditUpload] Synthesized Imgur album response for Reddit gallery albumID=%@ items=%lu", albumID, (unsigned long)assetIDs.count);
+    return [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+}
+
 static NSData *ApolloRedditRichTextJSONDataForText(NSString *text);
 
 // MARK: - Request identification
@@ -269,7 +534,23 @@ static BOOL ApolloIsRedditCommentRequest(NSURLRequest *request) {
 static BOOL ApolloIsRedditSubmitRequest(NSURLRequest *request) {
     if (![request isKindOfClass:[NSURLRequest class]]) return NO;
     NSURL *url = request.URL;
+    return [url.host isEqualToString:@"oauth.reddit.com"] &&
+        ([url.path isEqualToString:@"/api/submit"] ||
+         [url.path isEqualToString:@"/api/submit_gallery_post"] ||
+         [url.path isEqualToString:@"/api/submit_gallery_post.json"]);
+}
+
+static BOOL ApolloIsRedditLegacySubmitRequest(NSURLRequest *request) {
+    if (![request isKindOfClass:[NSURLRequest class]]) return NO;
+    NSURL *url = request.URL;
     return [url.host isEqualToString:@"oauth.reddit.com"] && [url.path isEqualToString:@"/api/submit"];
+}
+
+static BOOL ApolloIsRedditGallerySubmitRequest(NSURLRequest *request) {
+    if (![request isKindOfClass:[NSURLRequest class]]) return NO;
+    NSURL *url = request.URL;
+    return [url.host isEqualToString:@"oauth.reddit.com"] &&
+        ([url.path isEqualToString:@"/api/submit_gallery_post"] || [url.path isEqualToString:@"/api/submit_gallery_post.json"]);
 }
 
 BOOL ApolloRedditIsCommentTask(NSURLSessionTask *task) {
@@ -279,7 +560,13 @@ BOOL ApolloRedditIsCommentTask(NSURLSessionTask *task) {
 
 BOOL ApolloRedditIsSubmitTask(NSURLSessionTask *task) {
     if (![task isKindOfClass:[NSURLSessionTask class]]) return NO;
-    return ApolloIsRedditSubmitRequest(task.originalRequest) || ApolloIsRedditSubmitRequest(task.currentRequest);
+    NSURLRequest *associatedRequest = objc_getAssociatedObject(task, &kApolloRedditSubmitRequestKey);
+    return ApolloIsRedditSubmitRequest(associatedRequest) || ApolloIsRedditSubmitRequest(task.originalRequest) || ApolloIsRedditSubmitRequest(task.currentRequest);
+}
+
+void ApolloRedditAssociateSubmitRequestWithTask(NSURLSessionTask *task, NSURLRequest *request) {
+    if (![task isKindOfClass:[NSURLSessionTask class]] || !ApolloIsRedditSubmitRequest(request)) return;
+    objc_setAssociatedObject(task, &kApolloRedditSubmitRequestKey, request, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // MARK: - Submit context extraction
@@ -290,8 +577,33 @@ static NSDictionary *ApolloRedditMediaSubmitContextFromRequest(NSURLRequest *req
     if (!ApolloIsRedditSubmitRequest(request)) return nil;
     NSData *bodyData = request.HTTPBody;
     if (bodyData.length == 0) return nil;
+
+    if (ApolloIsRedditGallerySubmitRequest(request)) {
+        id json = [NSJSONSerialization JSONObjectWithData:bodyData options:0 error:nil];
+        NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+        if (!root) return nil;
+
+        NSMutableDictionary *context = [NSMutableDictionary dictionary];
+        NSString *subreddit = [root[@"sr"] isKindOfClass:[NSString class]] ? root[@"sr"] : nil;
+        NSString *title = [root[@"title"] isKindOfClass:[NSString class]] ? root[@"title"] : nil;
+        if (subreddit.length > 0) context[@"subreddit"] = subreddit;
+        if (title.length > 0) context[@"title"] = title;
+
+        NSArray *items = [root[@"items"] isKindOfClass:[NSArray class]] ? root[@"items"] : nil;
+        NSMutableArray<NSString *> *assetIDs = [NSMutableArray array];
+        for (id item in items) {
+            NSDictionary *dict = [item isKindOfClass:[NSDictionary class]] ? item : nil;
+            NSString *assetID = [dict[@"media_id"] isKindOfClass:[NSString class]] ? dict[@"media_id"] : nil;
+            if (assetID.length > 0) [assetIDs addObject:assetID];
+        }
+        if (assetIDs.count > 0) {
+            context[@"assetID"] = assetIDs.firstObject;
+            context[@"assetIDs"] = assetIDs;
+        }
+        return context[@"assetID"] ? context : nil;
+    }
+
     NSString *body = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
-    if (!ApolloStringContainsRedditUploadedMedia(body)) return nil;
 
     NSMutableDictionary *context = [NSMutableDictionary dictionary];
     for (NSString *pair in [body componentsSeparatedByString:@"&"]) {
@@ -306,31 +618,89 @@ static NSDictionary *ApolloRedditMediaSubmitContextFromRequest(NSURLRequest *req
             context[@"stagedURL"] = stagedURL;
             NSString *assetID = ApolloAssetIDForRedditUploadedMediaURL(stagedURL);
             if (assetID.length > 0) context[@"assetID"] = assetID;
+        } else if ([key isEqualToString:@"url"]) {
+            NSString *albumID = nil;
+            NSArray<NSString *> *assetIDs = ApolloRedditGalleryAssetIDsForURLString(value, &albumID);
+            if (assetIDs.count > 0) {
+                if (albumID.length > 0) context[@"albumID"] = albumID;
+                context[@"assetID"] = assetIDs.firstObject;
+                context[@"assetIDs"] = assetIDs;
+            }
         }
     }
-    return context.count > 0 ? context : nil;
+    return context[@"assetID"] ? context : nil;
+}
+
+static NSURLRequest *ApolloRedditGallerySubmitRequestFromForm(NSURLRequest *request, NSDictionary<NSString *, NSArray<NSString *> *> *formValues, NSArray<NSString *> *assetIDs, NSString *albumID) {
+    NSString *subreddit = ApolloFirstFormValue(formValues, @"sr");
+    NSString *title = ApolloFirstFormValue(formValues, @"title");
+    if (subreddit.length == 0 || title.length == 0 || assetIDs.count < 2) return nil;
+
+    NSMutableArray *items = [NSMutableArray arrayWithCapacity:assetIDs.count];
+    for (NSString *assetID in assetIDs) {
+        [items addObject:@{ @"media_id": assetID, @"caption": @"", @"outbound_url": @"" }];
+    }
+
+    NSMutableDictionary *payload = [NSMutableDictionary dictionary];
+    payload[@"api_type"] = @"json";
+    payload[@"items"] = items;
+    payload[@"nsfw"] = @(ApolloBoolFromFormValue(ApolloFirstFormValue(formValues, @"nsfw"), NO));
+    payload[@"resubmit"] = @(ApolloBoolFromFormValue(ApolloFirstFormValue(formValues, @"resubmit"), YES));
+    NSString *sendRepliesValue = ApolloFirstFormValue(formValues, @"sendreplies") ?: ApolloFirstFormValue(formValues, @"send_replies");
+    payload[@"sendreplies"] = @(ApolloBoolFromFormValue(sendRepliesValue, YES));
+    payload[@"show_error_list"] = @YES;
+    payload[@"spoiler"] = @(ApolloBoolFromFormValue(ApolloFirstFormValue(formValues, @"spoiler"), NO));
+    payload[@"sr"] = subreddit;
+    payload[@"title"] = title;
+    payload[@"validate_on_submit"] = @NO;
+
+    for (NSString *key in @[@"flair_id", @"flair_text", @"collection_id", @"discussion_type", @"text"]) {
+        NSString *value = ApolloFirstFormValue(formValues, key);
+        if (value.length > 0) payload[key] = value;
+    }
+
+    NSData *jsonBody = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (jsonBody.length == 0) return nil;
+
+    NSURLComponents *components = [NSURLComponents componentsWithURL:request.URL resolvingAgainstBaseURL:NO];
+    components.path = @"/api/submit_gallery_post.json";
+    components.queryItems = @[ [NSURLQueryItem queryItemWithName:@"raw_json" value:@"1"] ];
+
+    NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+    modifiedRequest.URL = components.URL;
+    modifiedRequest.HTTPBody = jsonBody;
+    modifiedRequest.HTTPMethod = @"POST";
+    [modifiedRequest setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [modifiedRequest setValue:[NSString stringWithFormat:@"%lu", (unsigned long)jsonBody.length] forHTTPHeaderField:@"Content-Length"];
+    ApolloLog(@"[RedditUpload] Rewrote /api/submit to gallery post (albumID=%@, items=%lu, %lu bytes)", albumID ?: @"(missing)", (unsigned long)assetIDs.count, (unsigned long)jsonBody.length);
+    return modifiedRequest;
 }
 
 // MARK: - Request rewriting (submit)
 
 NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request) {
-    if (sImageUploadProvider != ImageUploadProviderReddit || !ApolloIsRedditSubmitRequest(request)) return nil;
+    if (sImageUploadProvider != ImageUploadProviderReddit || !ApolloIsRedditLegacySubmitRequest(request)) return nil;
 
     NSData *bodyData = request.HTTPBody;
     if (bodyData.length == 0) return nil;
     NSString *body = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
-    if (!ApolloStringContainsRedditUploadedMedia(body)) return nil;
 
     NSArray<NSString *> *pairs = [body componentsSeparatedByString:@"&"];
+    NSDictionary<NSString *, NSArray<NSString *> *> *formValues = ApolloFormValuesByKeyFromBodyString(body);
     BOOL hasUploadedURLField = NO;
     BOOL hasUploadedTextField = NO;
+    NSString *galleryAlbumID = nil;
+    NSArray<NSString *> *galleryAssetIDs = nil;
     for (NSString *pair in pairs) {
         NSRange equals = [pair rangeOfString:@"="];
         NSString *key = ApolloFormDecodeComponent(equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]);
         NSString *value = ApolloFormDecodeComponent(equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location + 1]);
         if ([key isEqualToString:@"url"] && ApolloFirstRedditUploadedMediaURLInString(value).length > 0) hasUploadedURLField = YES;
+        if ([key isEqualToString:@"url"] && galleryAssetIDs.count == 0) galleryAssetIDs = ApolloRedditGalleryAssetIDsForURLString(value, &galleryAlbumID);
         if ([key isEqualToString:@"text"] && ApolloFirstRedditUploadedMediaURLInString(value).length > 0) hasUploadedTextField = YES;
     }
+    if (galleryAssetIDs.count >= 2) return ApolloRedditGallerySubmitRequestFromForm(request, formValues, galleryAssetIDs, galleryAlbumID);
+    if (!ApolloStringContainsRedditUploadedMedia(body)) return nil;
     if (!hasUploadedURLField && !hasUploadedTextField) return nil;
 
     NSMutableArray<NSString *> *rewrittenPairs = [NSMutableArray arrayWithCapacity:pairs.count + 2];
@@ -518,15 +888,57 @@ static NSString *ApolloRedditExtractLinkIDFromPostURL(NSString *urlString) {
     if (urlString.length == 0) return nil;
     NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
     NSString *host = components.host.lowercaseString;
-    if (![host isEqualToString:@"reddit.com"] && ![host hasSuffix:@".reddit.com"]) return nil;
+    BOOL relativeRedditPath = host.length == 0 && [urlString hasPrefix:@"/"];
+    if (!relativeRedditPath && ![host isEqualToString:@"reddit.com"] && ![host hasSuffix:@".reddit.com"]) return nil;
     NSArray<NSString *> *parts = components.path.pathComponents;
     for (NSUInteger i = 0; i + 1 < parts.count; i++) {
-        if ([parts[i] isEqualToString:@"comments"]) {
+        if ([parts[i] isEqualToString:@"comments"] || [parts[i] isEqualToString:@"gallery"]) {
             NSString *id_ = parts[i + 1];
             return id_.length > 0 ? id_ : nil;
         }
     }
     return nil;
+}
+
+static BOOL ApolloRedditPostURLIsGalleryURL(NSString *urlString) {
+    if (urlString.length == 0) return NO;
+    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+    NSString *host = components.host.lowercaseString;
+    BOOL relativeRedditPath = host.length == 0 && [urlString hasPrefix:@"/"];
+    if (!relativeRedditPath && ![host isEqualToString:@"reddit.com"] && ![host hasSuffix:@".reddit.com"]) return NO;
+    return [components.path.pathComponents containsObject:@"gallery"];
+}
+
+static NSString *ApolloRedditSlugForTitle(NSString *title) {
+    if (![title isKindOfClass:[NSString class]] || title.length == 0) return @"post";
+    NSMutableString *slug = [NSMutableString string];
+    BOOL lastWasSeparator = NO;
+    NSString *lowercaseTitle = title.lowercaseString;
+    for (NSUInteger i = 0; i < lowercaseTitle.length; i++) {
+        unichar ch = [lowercaseTitle characterAtIndex:i];
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+            [slug appendFormat:@"%C", ch];
+            lastWasSeparator = NO;
+        } else if (!lastWasSeparator && slug.length > 0) {
+            [slug appendString:@"_"];
+            lastWasSeparator = YES;
+        }
+    }
+    while ([slug hasSuffix:@"_"]) [slug deleteCharactersInRange:NSMakeRange(slug.length - 1, 1)];
+    return slug.length > 0 ? slug : @"post";
+}
+
+static NSString *ApolloRedditCanonicalCommentsURLForLinkID(NSString *linkID, NSDictionary *context) {
+    if (linkID.length == 0) return nil;
+    NSString *bareID = [linkID hasPrefix:@"t3_"] ? [linkID substringFromIndex:3] : linkID;
+    NSString *subreddit = [context[@"subreddit"] isKindOfClass:[NSString class]] ? context[@"subreddit"] : nil;
+    NSString *title = [context[@"title"] isKindOfClass:[NSString class]] ? context[@"title"] : nil;
+    NSString *slug = ApolloRedditSlugForTitle(title);
+    if (subreddit.length > 0) {
+        NSString *escapedSubreddit = [subreddit stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]] ?: subreddit;
+        return [NSString stringWithFormat:@"https://reddit.com/r/%@/comments/%@/%@/", escapedSubreddit, bareID, slug];
+    }
+    return [NSString stringWithFormat:@"https://reddit.com/comments/%@/%@/", bareID, slug];
 }
 
 static NSString *ApolloRedditExtractLinkIDFromWebsocketJSON(id json) {
@@ -718,6 +1130,9 @@ static NSData *ApolloRedditSynthesizeSubmitSuccessResponseData(NSString *linkID,
     NSString *fullName = [linkID hasPrefix:@"t3_"] ? linkID : [@"t3_" stringByAppendingString:linkID];
     NSString *bareID = [linkID hasPrefix:@"t3_"] ? [linkID substringFromIndex:3] : linkID;
     NSString *url = postURL.length > 0 ? postURL : ApolloRedditUploadFallbackURLForAssetID(context[@"assetID"]);
+    if (ApolloRedditPostURLIsGalleryURL(url)) {
+        url = ApolloRedditCanonicalCommentsURLForLinkID(linkID, context) ?: url;
+    }
 
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
     data[@"id"] = bareID;
@@ -727,6 +1142,105 @@ static NSData *ApolloRedditSynthesizeSubmitSuccessResponseData(NSString *linkID,
 
     NSDictionary *root = @{ @"json": @{ @"errors": @[], @"data": data } };
     return [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+}
+
+static id ApolloRedditSuccessfulSubmitResponseJSON(NSData *data) {
+    if (data.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+    NSDictionary *jsonDict = [root[@"json"] isKindOfClass:[NSDictionary class]] ? root[@"json"] : nil;
+    NSArray *errors = [jsonDict[@"errors"] isKindOfClass:[NSArray class]] ? jsonDict[@"errors"] : nil;
+    if (errors.count > 0) return nil;
+    return json;
+}
+
+static NSDictionary *ApolloRedditSubmitResponseErrorSummary(NSData *data) {
+    if (data.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+    NSDictionary *jsonDict = [root[@"json"] isKindOfClass:[NSDictionary class]] ? root[@"json"] : nil;
+    NSArray *errors = [jsonDict[@"errors"] isKindOfClass:[NSArray class]] ? jsonDict[@"errors"] : nil;
+    if (errors.count == 0) return nil;
+
+    NSString *code = nil, *field = nil, *message = nil;
+    id first = errors.firstObject;
+    if ([first isKindOfClass:[NSArray class]]) {
+        NSArray *parts = (NSArray *)first;
+        if (parts.count > 0 && [parts[0] isKindOfClass:[NSString class]]) code = parts[0];
+        if (parts.count > 1 && [parts[1] isKindOfClass:[NSString class]]) message = parts[1];
+        if (parts.count > 2 && [parts[2] isKindOfClass:[NSString class]]) field = parts[2];
+    } else if ([first isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)first;
+        code = [dict[@"error"] isKindOfClass:[NSString class]] ? dict[@"error"] : nil;
+        if (code.length == 0) code = [dict[@"code"] isKindOfClass:[NSString class]] ? dict[@"code"] : nil;
+        message = [dict[@"message"] isKindOfClass:[NSString class]] ? dict[@"message"] : nil;
+        field = [dict[@"field"] isKindOfClass:[NSString class]] ? dict[@"field"] : nil;
+    } else if ([first isKindOfClass:[NSString class]]) {
+        message = first;
+    }
+
+    NSString *lowerCode = code.lowercaseString ?: @"";
+    NSString *lowerMessage = message.lowercaseString ?: @"";
+    BOOL rateLimit = [lowerCode containsString:@"ratelimit"] || [lowerMessage containsString:@"ratelimit"] ||
+        [lowerMessage containsString:@"rate limit"] || [lowerMessage containsString:@"try again"] ||
+        [lowerMessage containsString:@"doing that too much"] || [lowerMessage containsString:@"wait"];
+
+    NSMutableDictionary *summary = [NSMutableDictionary dictionary];
+    summary[@"count"] = @(errors.count);
+    summary[@"code"] = code.length > 0 ? code : @"(missing)";
+    summary[@"field"] = field.length > 0 ? field : @"(missing)";
+    summary[@"messageLength"] = @(message.length);
+    summary[@"rateLimit"] = @(rateLimit);
+    return summary;
+}
+
+static NSString *ApolloRedditSubmitResponseDirectURL(NSData *data) {
+    id json = ApolloRedditSuccessfulSubmitResponseJSON(data);
+    NSDictionary *root = [json isKindOfClass:[NSDictionary class]] ? json : nil;
+    NSDictionary *jsonDict = [root[@"json"] isKindOfClass:[NSDictionary class]] ? root[@"json"] : nil;
+    NSDictionary *dataDict = [jsonDict[@"data"] isKindOfClass:[NSDictionary class]] ? jsonDict[@"data"] : nil;
+    NSString *url = [dataDict[@"url"] isKindOfClass:[NSString class]] ? dataDict[@"url"] : nil;
+    return url.length > 0 ? url : nil;
+}
+
+static NSString *ApolloRedditRecordMatchedPostURL(NSString *urlString, NSString **outLinkID, BOOL *outIsGallery) {
+    NSString *linkID = ApolloRedditExtractLinkIDFromPostURL(urlString);
+    if (linkID.length == 0) return nil;
+    if (outLinkID) *outLinkID = linkID;
+    if (outIsGallery) *outIsGallery = ApolloRedditPostURLIsGalleryURL(urlString);
+    return urlString;
+}
+
+static NSString *ApolloRedditExtractPostURLFromSubmitResponseNode(id node, NSString **outLinkID, BOOL *outIsGallery) {
+    if ([node isKindOfClass:[NSString class]]) {
+        return ApolloRedditRecordMatchedPostURL((NSString *)node, outLinkID, outIsGallery);
+    }
+
+    if ([node isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)node;
+        for (NSString *key in @[@"url", @"redirect", @"redirect_url", @"target_permalink", @"permalink", @"location"]) {
+            id value = dict[key];
+            if (![value isKindOfClass:[NSString class]]) continue;
+            NSString *found = ApolloRedditRecordMatchedPostURL((NSString *)value, outLinkID, outIsGallery);
+            if (found.length > 0) return found;
+        }
+        for (id value in dict.objectEnumerator) {
+            NSString *found = ApolloRedditExtractPostURLFromSubmitResponseNode(value, outLinkID, outIsGallery);
+            if (found.length > 0) return found;
+        }
+    } else if ([node isKindOfClass:[NSArray class]]) {
+        for (id value in (NSArray *)node) {
+            NSString *found = ApolloRedditExtractPostURLFromSubmitResponseNode(value, outLinkID, outIsGallery);
+            if (found.length > 0) return found;
+        }
+    }
+    return nil;
+}
+
+static NSString *ApolloRedditExtractPostURLFromSubmitResponseJSON(id json, NSString **outLinkID, BOOL *outIsGallery) {
+    if (outLinkID) *outLinkID = nil;
+    if (outIsGallery) *outIsGallery = NO;
+    return ApolloRedditExtractPostURLFromSubmitResponseNode(json, outLinkID, outIsGallery);
 }
 
 // Pulls the websocket URL and user-submitted-page out of Reddit's image-submit response.
@@ -753,15 +1267,47 @@ static NSDictionary *ApolloRedditParseSubmitResponseLinks(NSData *data) {
 
 void ApolloRedditTransformSubmitResponseAsync(NSData *originalData, NSURLRequest *originalRequest, ApolloRedditResponseDataCompletion completion) {
     NSDictionary *context = ApolloRedditMediaSubmitContextFromRequest(originalRequest);
-    if (!context) { completion(originalData); return; }
+    NSString *requestPath = originalRequest.URL.path ?: @"(missing)";
+    if (!context) {
+        ApolloLog(@"[RedditUpload] Submit response transform skipped path=%@ bytes=%lu reason=missing-context", requestPath, (unsigned long)originalData.length);
+        completion(originalData);
+        return;
+    }
+
+    NSDictionary *errorSummary = ApolloRedditSubmitResponseErrorSummary(originalData);
+    if (errorSummary) {
+        ApolloLog(@"[RedditUpload] Submit response error path=%@ bytes=%lu count=%@ code=%@ field=%@ rateLimit=%@ messageLen=%@", requestPath, (unsigned long)originalData.length, errorSummary[@"count"], errorSummary[@"code"], errorSummary[@"field"], [errorSummary[@"rateLimit"] boolValue] ? @"yes" : @"no", errorSummary[@"messageLength"]);
+    }
+
+    NSString *directURL = ApolloRedditSubmitResponseDirectURL(originalData);
+    id responseJSON = ApolloRedditSuccessfulSubmitResponseJSON(originalData);
+    NSString *scannedLinkID = nil;
+    BOOL scannedIsGallery = NO;
+    NSString *scannedPostURL = ApolloRedditExtractPostURLFromSubmitResponseJSON(responseJSON, &scannedLinkID, &scannedIsGallery);
+    NSString *directLinkID = ApolloRedditPostURLIsGalleryURL(directURL) ? ApolloRedditExtractLinkIDFromPostURL(directURL) : nil;
+    if (directLinkID.length == 0 && scannedLinkID.length > 0) directLinkID = scannedLinkID;
+    ApolloLog(@"[RedditUpload] Submit response transform path=%@ bytes=%lu directURL=%@ scannedPost=%@ gallery=%@", requestPath, (unsigned long)originalData.length, directURL.length > 0 ? @"yes" : @"no", scannedPostURL.length > 0 ? @"yes" : @"no", scannedIsGallery ? @"yes" : @"no");
+    if (directLinkID.length > 0) {
+        NSString *commentsURL = ApolloRedditCanonicalCommentsURLForLinkID(directLinkID, context);
+        NSData *synth = ApolloRedditSynthesizeSubmitSuccessResponseData(directLinkID, commentsURL, context);
+        if (synth.length > 0) {
+            ApolloLog(@"[RedditUpload] Normalized gallery submit success response (linkID=%@, url=%@)", directLinkID, commentsURL ?: @"(missing)");
+            completion(synth);
+            return;
+        }
+    }
 
     NSDictionary *links = ApolloRedditParseSubmitResponseLinks(originalData);
-    if (!links) { completion(originalData); return; }
+    if (!links) {
+        ApolloLog(@"[RedditUpload] Submit response transform pass-through path=%@ reason=no-direct-post-or-async-links", requestPath);
+        completion(originalData);
+        return;
+    }
 
     NSMutableDictionary *resolutionContext = [context mutableCopy];
     if (links[@"userSubmittedPage"]) resolutionContext[@"userSubmittedPage"] = links[@"userSubmittedPage"];
 
-    ApolloLog(@"[RedditUpload] Resolving linkID for /api/submit (assetID=%@, sr=%@)", context[@"assetID"] ?: @"(missing)", context[@"subreddit"] ?: @"(missing)");
+    ApolloLog(@"[RedditUpload] Resolving linkID for /api/submit (assetID=%@, sr=%@, websocket=%@, submittedPage=%@)", context[@"assetID"] ?: @"(missing)", context[@"subreddit"] ?: @"(missing)", links[@"webSocketURL"] ? @"yes" : @"no", links[@"userSubmittedPage"] ? @"yes" : @"no");
 
     ApolloRedditResolveSubmittedLinkID(links[@"webSocketURL"], resolutionContext, ^(NSString *linkID, NSString *postURL) {
         if (linkID.length == 0) {
@@ -1125,7 +1671,7 @@ void ApolloRedditInstallResponseTransformerForDelegate(id delegate) {
         if (ApolloRedditIsSubmitTask(task)) {
             NSMutableData *buffered = objc_getAssociatedObject(task, &kApolloRedditSubmitResponseDataKey);
             objc_setAssociatedObject(task, &kApolloRedditSubmitResponseDataKey, nil, OBJC_ASSOCIATION_ASSIGN);
-            NSURLRequest *submitRequest = task.originalRequest ?: task.currentRequest;
+            NSURLRequest *submitRequest = objc_getAssociatedObject(task, &kApolloRedditSubmitRequestKey) ?: task.originalRequest ?: task.currentRequest;
             ApolloRedditTransformSubmitResponseAsync(buffered, submitRequest, ^(NSData *transformed) {
                 dispatchOriginalDelivery(session, task, transformed.length > 0 ? transformed : buffered, error, selfObject);
             });
